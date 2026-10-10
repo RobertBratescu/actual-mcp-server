@@ -27,6 +27,8 @@
 //      12b: the same bound still lets a late conversion succeed;
 //      12c: the cap counts from op start, so a slow pre-flight read leaves the poll less time
 //  13. #494: ACTUAL_OP_TIMEOUT_MS=0 (pass-through) leaves the poll at SPLIT_VERIFY_TIMEOUT_MS
+//  14. #495: the parent shows 1 of 2 children for a while, then both -> success only after both
+//  15. #495: stuck at 1 of 2 children -> "outcome is unknown", never a partial success
 
 process.env.ACTUAL_SERVER_URL     = process.env.ACTUAL_SERVER_URL     ?? 'http://localhost:5006';
 process.env.ACTUAL_BUDGET_SYNC_ID = process.env.ACTUAL_BUDGET_SYNC_ID ?? '00000000-0000-0000-0000-000000000000';
@@ -55,6 +57,8 @@ const CAT2 = '00000000-0000-0000-0000-0000000000c2';
   let landed = [];
   let visibleAfterReads = 0;   // read-backs that still see the plain row after the write
   let readBacks = 0;
+  let partial = [];           // #495: rows a read-back sees while only some children are visible
+  let partialReads = 0;       // #495: how many read-backs, after the lagReads window, see `partial`
   let preflightDelayMs = 0;   // #494 case 12c: how long the pre-flight (non read-back) query takes
   let rawUpdateCalls = [];
   let rawUpdateFields = [];
@@ -68,6 +72,7 @@ const CAT2 = '00000000-0000-0000-0000-0000000000c2';
     if (isReadBack(s)) {
       readBacks++;
       if (rawUpdateCalls.length === 0 || readBacks <= visibleAfterReads) return { data: stored ? [stored] : [] };
+      if (readBacks <= visibleAfterReads + partialReads) return { data: partial };
       return { data: landed };
     }
     witness?.noteRead();
@@ -93,9 +98,9 @@ const CAT2 = '00000000-0000-0000-0000-0000000000c2';
     { id: 'child-2', is_parent: false, parent_id: ID },
   ];
   const subs = [{ amount: -3000, category: CAT1 }, { amount: -2000, category: CAT2 }];
-  const reset = ({ row, after = [], lagReads = 0, preflightDelay = 0 }) => {
+  const reset = ({ row, after = [], lagReads = 0, partial: part = [], partialReads: partReads = 0, preflightDelay = 0 }) => {
     stored = row; landed = after; visibleAfterReads = lagReads; readBacks = 0; rawUpdateCalls = []; rawUpdateFields = [];
-    preflightDelayMs = preflightDelay;
+    partial = part; partialReads = partReads; preflightDelayMs = preflightDelay;
     witness.reset();
   };
   const attempt = async (fn) => { try { return { value: await fn(), error: null }; } catch (e) { return { value: null, error: e }; } };
@@ -265,6 +270,27 @@ const CAT2 = '00000000-0000-0000-0000-0000000000c2';
       const lost = await attempt(() => adapter.updateTransaction(ID, { subtransactions: subs }));
       check(/after 2000ms/.test(lost.error?.message || ''), 'never-visible still throws at SPLIT_VERIFY_TIMEOUT_MS', lost.error?.message);
     } finally { config.ACTUAL_OP_TIMEOUT_MS = prev; }
+  }
+
+  console.log('\n[#495] 14. 1 of 2 children visible for 3 read-backs, then both -> success after both');
+  {
+    reset({ row: plain, after: splitRows, partial: splitRows.slice(0, 2), partialReads: 3 });
+    const { value, error } = await attempt(() => adapter.updateTransaction(ID, { subtransactions: subs }));
+    check(error === null && value?.split?.parent === ID, 'resolves with the split', error?.message);
+    check(JSON.stringify(value?.split?.children) === JSON.stringify(['child-1', 'child-2']), 'reports both children', JSON.stringify(value?.split?.children));
+    check(readBacks > 3, 'kept polling through the partial reads', `readBacks=${readBacks}`);
+    check(rawUpdateCalls.length === 1, 'exactly one raw write', `calls=${rawUpdateCalls.length}`);
+  }
+
+  console.log('\n[#495] 15. stuck at 1 of 2 children -> "outcome is unknown", not a partial success');
+  {
+    reset({ row: plain, after: splitRows.slice(0, 2) });
+    const { value, error } = await attempt(() => adapter.updateTransaction(ID, { subtransactions: subs }));
+    check(value === null && /outcome is unknown/.test(error?.message || ''), 'throws "outcome is unknown"', error?.message);
+    check(/found 1 children/.test(error?.message || ''), 'it is the partial path (found 1 children)', error?.message);
+    check(error && !isPreflightRefusal(error), 'not a pre-flight refusal');
+    check(error && !isRetryableError(error), 'not classed retryable');
+    check(rawUpdateCalls.length === 1, 'exactly one raw write', `calls=${rawUpdateCalls.length}`);
   }
 
   await new Promise((r) => setTimeout(r, 50));
