@@ -22,6 +22,11 @@
 //  10. `amount` in the same call: children must sum to the NEW amount, not the stored one
 //  11. the never-visible error is not classed transient, so it is neither retried nor
 //      mistaken for an infrastructure failure that drops the pooled connection
+//  12. #494: under a small ACTUAL_OP_TIMEOUT_MS the poll gives up first, so the caller gets
+//      "outcome is unknown" rather than the generic timeout, and no read-back outlives the call;
+//      12b: the same bound still lets a late conversion succeed;
+//      12c: the cap counts from op start, so a slow pre-flight read leaves the poll less time
+//  13. #494: ACTUAL_OP_TIMEOUT_MS=0 (pass-through) leaves the poll at SPLIT_VERIFY_TIMEOUT_MS
 
 process.env.ACTUAL_SERVER_URL     = process.env.ACTUAL_SERVER_URL     ?? 'http://localhost:5006';
 process.env.ACTUAL_BUDGET_SYNC_ID = process.env.ACTUAL_BUDGET_SYNC_ID ?? '00000000-0000-0000-0000-000000000000';
@@ -50,6 +55,7 @@ const CAT2 = '00000000-0000-0000-0000-0000000000c2';
   let landed = [];
   let visibleAfterReads = 0;   // read-backs that still see the plain row after the write
   let readBacks = 0;
+  let preflightDelayMs = 0;   // #494 case 12c: how long the pre-flight (non read-back) query takes
   let rawUpdateCalls = [];
   let rawUpdateFields = [];
   let witness = null;
@@ -65,6 +71,7 @@ const CAT2 = '00000000-0000-0000-0000-0000000000c2';
       return { data: landed };
     }
     witness?.noteRead();
+    if (preflightDelayMs > 0) await new Promise((r) => setTimeout(r, preflightDelayMs));
     return { data: stored ? [stored] : [] };
   };
   apiDefault.updateTransaction = async (id, fields) => { witness?.noteWrite(); rawUpdateCalls.push(id); rawUpdateFields.push(fields); };
@@ -72,6 +79,7 @@ const CAT2 = '00000000-0000-0000-0000-0000000000c2';
   const adapterMod = await import('../../dist/src/lib/actual-adapter.js');
   const { isPreflightRefusal } = await import('../../dist/src/lib/errors.js');
   const { isRetryableError } = await import('../../dist/src/lib/retry.js');
+  const { default: config } = await import('../../dist/src/config.js');
   const tool = (await import('../../dist/src/tools/transactions_update.js')).default;
   const adapter = adapterMod.default;
   adapterMod._setSkipApiInitForTests(true);
@@ -85,8 +93,9 @@ const CAT2 = '00000000-0000-0000-0000-0000000000c2';
     { id: 'child-2', is_parent: false, parent_id: ID },
   ];
   const subs = [{ amount: -3000, category: CAT1 }, { amount: -2000, category: CAT2 }];
-  const reset = ({ row, after = [], lagReads = 0 }) => {
+  const reset = ({ row, after = [], lagReads = 0, preflightDelay = 0 }) => {
     stored = row; landed = after; visibleAfterReads = lagReads; readBacks = 0; rawUpdateCalls = []; rawUpdateFields = [];
+    preflightDelayMs = preflightDelay;
     witness.reset();
   };
   const attempt = async (fn) => { try { return { value: await fn(), error: null }; } catch (e) { return { value: null, error: e }; } };
@@ -197,6 +206,65 @@ const CAT2 = '00000000-0000-0000-0000-0000000000c2';
     const bad = await attempt(() => adapter.updateTransaction(ID, { amount: -7000, subtransactions: subs }));
     check(isPreflightRefusal(bad.error) && /Expected -7000, got -5000/.test(bad.error?.message || ''), 'children summing to the STORED amount are refused', bad.error?.message);
     check(rawUpdateCalls.length === 0, 'rawUpdateTransaction NOT reached');
+  }
+
+  console.log('\n[#494] 12. ACTUAL_OP_TIMEOUT_MS=500, conversion never visible -> "outcome is unknown", not "timed out"');
+  {
+    const prev = config.ACTUAL_OP_TIMEOUT_MS;
+    config.ACTUAL_OP_TIMEOUT_MS = 500;
+    try {
+      reset({ row: plain, after: [plain] });
+      const { value, error } = await attempt(() => adapter.updateTransaction(ID, { subtransactions: subs }));
+      check(value === null && /outcome is unknown/.test(error?.message || ''), 'the poll gives up before the op timeout', error?.message);
+      check(!/timed out/.test(error?.message || ''), 'not the generic op-timeout error', error?.message);
+      check(/after 250ms/.test(error?.message || ''), 'message names the bound actually applied', error?.message);
+      const settled = readBacks;
+      await new Promise((r) => setTimeout(r, 150));
+      check(readBacks === settled, 'no read-back runs after the call settles', `before=${settled} after=${readBacks}`);
+    } finally { config.ACTUAL_OP_TIMEOUT_MS = prev; }
+  }
+
+  console.log('\n[#494] 12b. ACTUAL_OP_TIMEOUT_MS=500, conversion visible after 3 read-backs -> success');
+  {
+    const prev = config.ACTUAL_OP_TIMEOUT_MS;
+    config.ACTUAL_OP_TIMEOUT_MS = 500;
+    try {
+      reset({ row: plain, after: splitRows, lagReads: 3 });
+      const { value, error } = await attempt(() => adapter.updateTransaction(ID, { subtransactions: subs }));
+      check(error === null && value?.split?.parent === ID && value.split.children.length === 2,
+        'the bound is not so tight that a normal late conversion is reported unknown', error?.message);
+    } finally { config.ACTUAL_OP_TIMEOUT_MS = prev; }
+  }
+
+  console.log('\n[#494] 12c. ACTUAL_OP_TIMEOUT_MS=500, pre-flight takes 300ms -> the cap counts from op start');
+  {
+    const prev = config.ACTUAL_OP_TIMEOUT_MS;
+    config.ACTUAL_OP_TIMEOUT_MS = 500;
+    try {
+      // A deadline counted from the poll start would land near 550ms, after the 500ms op timeout.
+      reset({ row: plain, after: [plain], preflightDelay: 300 });
+      const { value, error } = await attempt(() => adapter.updateTransaction(ID, { subtransactions: subs }));
+      check(value === null && /outcome is unknown/.test(error?.message || ''), 'the poll still gives up before the op timeout', error?.message);
+      check(!/timed out/.test(error?.message || ''), 'not the generic op-timeout error', error?.message);
+      check(/after 250ms/.test(error?.message || ''), 'message names the bound', error?.message);
+      const settled = readBacks;
+      await new Promise((r) => setTimeout(r, 150));
+      check(readBacks === settled, 'no read-back runs after the call settles', `before=${settled} after=${readBacks}`);
+    } finally { config.ACTUAL_OP_TIMEOUT_MS = prev; }
+  }
+
+  console.log('\n[#494] 13. ACTUAL_OP_TIMEOUT_MS=0 (no op timeout) -> the poll keeps its own bound');
+  {
+    const prev = config.ACTUAL_OP_TIMEOUT_MS;
+    config.ACTUAL_OP_TIMEOUT_MS = 0;
+    try {
+      reset({ row: plain, after: splitRows, lagReads: 3 });
+      const late = await attempt(() => adapter.updateTransaction(ID, { subtransactions: subs }));
+      check(late.error === null && late.value?.split?.parent === ID, 'a late conversion still succeeds', late.error?.message);
+      reset({ row: plain, after: [plain] });
+      const lost = await attempt(() => adapter.updateTransaction(ID, { subtransactions: subs }));
+      check(/after 2000ms/.test(lost.error?.message || ''), 'never-visible still throws at SPLIT_VERIFY_TIMEOUT_MS', lost.error?.message);
+    } finally { config.ACTUAL_OP_TIMEOUT_MS = prev; }
   }
 
   await new Promise((r) => setTimeout(r, 50));

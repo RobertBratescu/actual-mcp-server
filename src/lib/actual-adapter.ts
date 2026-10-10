@@ -2360,6 +2360,9 @@ export async function updateTransaction(
   observability.incrementToolCall('actual.transactions.update').catch(() => {});
   // Use write queue to batch concurrent updates in a single budget session
   return queueWriteOperation(async () => {
+    // #494: the drain's op timeout starts when this callback starts, so the split poll's cap
+    // below is measured from here, not from the end of the write (same origin as #538's startedAt).
+    const opStartedAt = Date.now();
     // Pre-flight existence check (#212): the raw API silently no-ops on a missing id,
     // so an update that changed nothing would otherwise be reported as success. A
     // targeted ActualQL query by id keeps this cheap (indexed lookup). #305 extends
@@ -2443,8 +2446,16 @@ export async function updateTransaction(
     // with every requested child. Polling here, inside the drain, also guarantees the change is
     // local before the drain's api.sync(). A retry after a timeout is safe: the row is then a
     // split, so a second call EDITS its children rather than creating anything new.
+    // #494: the poll must end before the op timeout does, or the caller sees "timed out" (which
+    // invites a retry) while this callback keeps reading in the background. Cap it at HALF the op
+    // timeout, counted from op start; 0 disables the op timeout, so the poll keeps its own bound.
+    // Do not cap at opStartedAt + boundMs: that term would also shorten the poll at the default.
     const expected = subs!.length;
-    const deadline = Date.now() + SPLIT_VERIFY_TIMEOUT_MS;
+    const T = config.ACTUAL_OP_TIMEOUT_MS;
+    const deadline = T > 0
+      ? Math.min(Date.now() + SPLIT_VERIFY_TIMEOUT_MS, opStartedAt + Math.floor(T / 2))
+      : Date.now() + SPLIT_VERIFY_TIMEOUT_MS;
+    const boundMs = T > 0 ? Math.min(SPLIT_VERIFY_TIMEOUT_MS, Math.floor(T / 2)) : SPLIT_VERIFY_TIMEOUT_MS;
     for (;;) {
       const res = (await rawRunQuery(
         q('transactions').options({ splits: 'all' })
@@ -2459,7 +2470,7 @@ export async function updateTransaction(
       }
       if (Date.now() >= deadline) {
         throw new Error(
-          `Transaction "${id}" was sent to be split into ${expected} parts, but the split was not visible after ${SPLIT_VERIFY_TIMEOUT_MS}ms (found ${children.length} children), so the outcome is unknown. ` +
+          `Transaction "${id}" was sent to be split into ${expected} parts, but the split was not visible after ${boundMs}ms (found ${children.length} children), so the outcome is unknown. ` +
           'Read it back with actual_transactions_get before retrying: if it is already a split, a retry edits its children rather than duplicating them.'
         );
       }

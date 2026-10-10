@@ -65,6 +65,13 @@ export const WRITE_SESSION_DELAY_MS = 100;
  * therefore reads the split back, polling every SPLIT_VERIFY_INTERVAL_MS, and refuses to report
  * success if it has not appeared within this bound. A local SQLite write, so milliseconds in
  * practice; the bound only decides how long a genuinely lost write takes to be reported.
+ *
+ * #494: the poll runs inside the drain under ACTUAL_OP_TIMEOUT_MS, which races the callback rather
+ * than cancelling it. So the effective bound is min(this, ACTUAL_OP_TIMEOUT_MS / 2), counted from
+ * the start of the operation; an op timeout of 0 (disabled) leaves this bound alone. The cap is
+ * cooperative: one read already in flight at the deadline can still outlive the op timeout if that
+ * single read takes longer than the remaining half. Separately, the pre-flight read's retry backoff
+ * (200ms then 400ms) can by itself exceed an op timeout under 600ms; that is outside the poll.
  */
 export const SPLIT_VERIFY_TIMEOUT_MS = 2000;
 export const SPLIT_VERIFY_INTERVAL_MS = 25;
