@@ -331,6 +331,13 @@ console.log('\n[#539] transfer: the partial-transfer rethrow keeps infrastructur
     check(e && e.message.includes(`so its outcome is unknown (it was 1000)`) && !e.message.includes('unchanged'),
       `"${text}": the target is reported as unknown, never as unchanged`, e?.message);
   }
+  // #544: a rate limit is transient (retryable) but does not drop the pool; its outcome is
+  // just as unknown, so it must not be reported as unchanged either.
+  const limited = await classify('Authentication failed: Too many requests');
+  check(limited && retryMod.isRateLimitError(limited),
+    '[#544] a rate limit on the second write keeps its classification (no pool drop)', limited?.message);
+  check(limited && limited.message.includes('so its outcome is unknown (it was 1000)') && !limited.message.includes('unchanged'),
+    '[#544] a rate limit on the second write is reported as unknown, never as unchanged', limited?.message);
   const domain = await classify('category "x" is not an expense category');
   check(domain && !retryMod.isRetryableError(domain), 'a domain error on the second write does not', domain?.message);
   check(domain && domain.message.includes('so it is unchanged at 1000'), 'and a domain rejection may say the target is unchanged', domain?.message);

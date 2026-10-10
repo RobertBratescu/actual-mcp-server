@@ -2264,9 +2264,11 @@ export async function transferBudgetAmount(
       await withConcurrency(() => rawSetBudgetAmount(month, toCategoryId, prevTo + amount) as Promise<void>);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      // An infrastructure error says nothing about whether the write landed, so only a
-      // deterministic (domain) rejection may claim the target is unchanged.
-      const target = _shouldDropPoolOnError(error)
+      // A transient error (infrastructure or a rate limit) says nothing about whether the write
+      // landed, so only a deterministic (domain) rejection may claim the target is unchanged.
+      // #544: this is isRetryableError, not _shouldDropPoolOnError: a rate limit keeps the pool
+      // but its outcome is just as unknown. The pool-drop decision itself is untouched.
+      const target = isRetryableError(error)
         ? `its outcome is unknown (it was ${prevTo})`
         : `it is unchanged at ${prevTo}`;
       // The original text stays INSIDE the message: isRetryableError classifies by message only
