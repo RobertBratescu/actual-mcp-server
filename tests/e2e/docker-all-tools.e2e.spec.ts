@@ -1619,6 +1619,58 @@ test.describe('Docker E2E - ALL 83 TOOLS', () => {
     expect(schedules.find((s: any) => s.id === schedule.id)?.name).toBe(updatedName);
   });
 
+  // #527: 'isbetween' takes a { num1, num2 } range; a scalar is stored by upstream but can
+  // never match a transaction, so it is refused before the write.
+  const readSchedule = async (mcp: any, id: string) => {
+    const listData = await mcp.call('actual_schedules_get');
+    const schedules: any[] =
+      listData?.schedules ?? listData?.result?.schedules ?? (Array.isArray(listData) ? listData : []);
+    return schedules.find((s: any) => s.id === id);
+  };
+
+  test('actual_schedules_create - should store an isbetween range and read it back (#527)', async ({ mcp, makeSchedule }) => {
+    const schedule = await makeSchedule({ amountOp: 'isbetween', amount: { num1: -10000, num2: -5000 } });
+
+    const row = await readSchedule(mcp, schedule.id);
+    expect(row?.amountOp).toBe('isbetween');
+    expect(row?.amount).toEqual({ num1: -10000, num2: -5000 });
+  });
+
+  test('actual_schedules_update - should replace an isbetween range with amount alone (#527)', async ({ mcp, makeSchedule }) => {
+    const schedule = await makeSchedule({ amountOp: 'isbetween', amount: { num1: -10000, num2: -5000 } });
+
+    const data = await mcp.call('actual_schedules_update', { id: schedule.id, amount: { num1: -20000, num2: -15000 } });
+    expect(data?.success ?? data?.result?.success).toBe(true);
+
+    const row = await readSchedule(mcp, schedule.id);
+    expect(row?.amountOp).toBe('isbetween');
+    expect(row?.amount).toEqual({ num1: -20000, num2: -15000 });
+  });
+
+  test('actual_schedules_create - should refuse a scalar amount with isbetween (#527)', async ({ mcp }) => {
+    await expect(
+      mcp.call('actual_schedules_create', {
+        name: `E2E-Schedule-Scalar-${uniqueSuffix()}`,
+        date: '2026-06-15',
+        amount: -5000,
+        amountOp: 'isbetween',
+        posts_transaction: false,
+      }),
+    ).rejects.toThrow(/num1, num2/);
+  });
+
+  test('actual_schedules_update - should refuse amountOp isbetween alone on an is schedule (#527)', async ({ mcp, makeSchedule }) => {
+    const schedule = await makeSchedule();
+
+    await expect(
+      mcp.call('actual_schedules_update', { id: schedule.id, amountOp: 'isbetween' }),
+    ).rejects.toThrow(/num1, num2/);
+
+    const row = await readSchedule(mcp, schedule.id);
+    expect(row?.amountOp).toBe('is');
+    expect(row?.amount).toBe(-5000);
+  });
+
   test('actual_schedules_delete - should delete schedule and verify gone', async ({ mcp, makeSchedule }) => {
     const schedule = await makeSchedule();
 

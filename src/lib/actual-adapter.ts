@@ -76,6 +76,7 @@ import { retry, isRetryableError, isRateLimitError } from './retry.js';
 import { withOpTimeout } from './opTimeout.js';
 import { markInitFailure } from './init-failure.js';
 import { NotFoundRefusal, OutOfRangeRefusal, constraintErrorMsg } from './errors.js';
+import { amountOpMismatch } from './schemas/schedule-amount.js';
 import { findMatchingRule, type RuleCondition } from './rule-matching.js';
 import logger from '../logger.js';
 import { checkServerVersionOnce } from './server-version-guard.js';
@@ -3188,7 +3189,33 @@ export async function createSchedule(schedule: unknown): Promise<string> {
 export async function updateSchedule(id: string, fields: unknown, resetNextDate?: boolean): Promise<void> {
   observability.incrementToolCall('actual.schedules.update').catch(() => {});
   return queueWriteOperation(async () => {
-    await withConcurrency(() => retry(() => rawUpdateSchedule(id, fields as Record<string, unknown>, resetNextDate) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
+    // #527: upstream MERGES a partial update, so `amountOp` alone keeps the stored amount and
+    // `amount` alone keeps the stored op. Whether the pair fits ('isbetween' takes a
+    // { num1, num2 } range, every other op a number) therefore depends on the stored row when
+    // only one of the two is supplied. The tool's own refinement covers both-supplied. Decided
+    // and thrown BEFORE the non-retried write, so a refusal is never retried or swallowed. A
+    // schedule that is not found falls through to upstream's own not-found error, unchanged.
+    const patch = (fields ?? {}) as Record<string, unknown>;
+    const hasAmount = patch.amount !== undefined;
+    const hasOp = patch.amountOp !== undefined;
+    if (hasAmount !== hasOp) {
+      const schedules = await withConcurrency(() =>
+        retry(() => rawGetSchedules() as Promise<Array<{ id?: string; amount?: unknown; amountOp?: unknown }>>, { retries: 2, backoffMs: 200 })
+      );
+      const stored = Array.isArray(schedules) ? schedules.find((sch) => sch?.id === id) : undefined;
+      if (stored) {
+        const op = hasOp ? patch.amountOp : stored.amountOp;
+        const amount = hasAmount ? patch.amount : stored.amount;
+        const message = amountOpMismatch(op, amount);
+        if (message) {
+          throw new OutOfRangeRefusal(
+            `Schedule "${id}" was not updated: ${message} (stored amountOp ${JSON.stringify(stored.amountOp ?? null)}, stored amount ${JSON.stringify(stored.amount ?? null)}).`,
+            JSON.stringify({ amountOp: op ?? null, amount: amount ?? null }),
+          );
+        }
+      }
+    }
+    await withConcurrency(() => retry(() => rawUpdateSchedule(id, patch, resetNextDate) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
   }, { preservesListings: PRESERVES_ALL_ENTITY_LISTINGS });
 }
 /**

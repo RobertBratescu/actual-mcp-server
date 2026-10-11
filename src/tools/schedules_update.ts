@@ -3,6 +3,7 @@ import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
 import { CommonSchemas } from '../lib/schemas/common.js';
 import { RecurConfigSchema } from '../lib/schemas/recur.js';
+import { ScheduleAmountSchema, amountOpMismatch } from '../lib/schemas/schedule-amount.js';
 
 const InputSchema = z.object({
   id: CommonSchemas.scheduleId.describe('Schedule UUID'),
@@ -12,8 +13,8 @@ const InputSchema = z.object({
     .describe('New payee UUID, null to clear'),
   account: CommonSchemas.accountId.nullable().optional()
     .describe('New account UUID, null to clear'),
-  amount: z.number().int().optional()
-    .describe('New amount in cents, negative = expense'),
+  amount: ScheduleAmountSchema.optional()
+    .describe('New amount in cents, negative = expense. A number, or { num1, num2 } only with amountOp isbetween'),
   amountOp: z.enum(['is', 'isapprox', 'isbetween']).optional()
     .describe('How to match the amount'),
   date: z.union([
@@ -29,6 +30,12 @@ const InputSchema = z.object({
     .describe('true marks it completed, false reactivates it'),
   resetNextDate: z.boolean().optional().default(false)
     .describe('Recalculate next_date; set it when changing the date'),
+}).superRefine((input, ctx) => {
+  // #527: with both fields supplied the input alone decides. With only one, the answer
+  // depends on the stored schedule, so adapter.updateSchedule checks it inside the write queue.
+  if (input.amount === undefined || input.amountOp === undefined) return;
+  const message = amountOpMismatch(input.amountOp, input.amount);
+  if (message) ctx.addIssue({ code: 'custom', path: ['amount'], message });
 });
 
 const tool: ToolDefinition = {

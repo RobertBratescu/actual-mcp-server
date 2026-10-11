@@ -25,6 +25,7 @@ const RID = '33333333-3333-3333-3333-333333333333';
 const rulesUpdate = (await import('../../dist/src/tools/rules_update.js')).default;
 const schedulesCreate = (await import('../../dist/src/tools/schedules_create.js')).default;
 const schedulesUpdate = (await import('../../dist/src/tools/schedules_update.js')).default;
+const { formatZodError } = await import('../../dist/src/lib/zod-error-format.js');
 
 const where = (tool, input) => {
   const r = tool.inputSchema.safeParse(input);
@@ -70,7 +71,7 @@ console.log('\n[#486] schedules_create: date and amount constraints');
   check(where(schedulesCreate, base).ok, 'a one-off schedule parses');
   const bad = where(schedulesCreate, { ...base, date: '2026-1-5' });
   check(!bad.ok && bad.issues.some((i) => i.startsWith('invalid_format at date')), 'date 2026-1-5 is invalid_format at date', bad.issues.join(','));
-  check(rejectedWith(schedulesCreate, { ...base, amount: 12.5 }, 'invalid_type at amount'), 'amount 12.5 is invalid_type at amount');
+  check(rejectedWith(schedulesCreate, { ...base, amount: 12.5 }, 'invalid_union at amount'), 'amount 12.5 is invalid_union at amount (number or range, #527)');
   check(rejectedWith(schedulesCreate, { name: 'x', amount: 100 }, 'invalid_union at date'), 'date is required (invalid_union at date)');
   const missingBranches = unionBranches(schedulesCreate, { name: 'x', amount: 100 });
   check(missingBranches !== null && missingBranches.length > 0 && missingBranches.every((b) => b.length === 1 && b[0] === 'invalid_type at '), 'a missing date fails every union branch with invalid_type', JSON.stringify(missingBranches));
@@ -93,12 +94,77 @@ console.log('\n[#486] schedules_update: constraints');
   check(where(schedulesUpdate, { id: SID, name: 'x' }).ok, 'a partial update parses');
   check(rejectedWith(schedulesUpdate, { name: 'x' }, 'invalid_type at id'), 'id is required (invalid_type at id)');
   check(rejectedWith(schedulesUpdate, { id: SID, date: '2026-1-5' }, 'invalid_format at date'), 'date 2026-1-5 is invalid_format at date');
-  check(rejectedWith(schedulesUpdate, { id: SID, amount: 12.5 }, 'invalid_type at amount'), 'amount 12.5 is invalid_type at amount');
+  check(rejectedWith(schedulesUpdate, { id: SID, amount: 12.5 }, 'invalid_union at amount'), 'amount 12.5 is invalid_union at amount (number or range, #527)');
   const nulls = where(schedulesUpdate, { id: SID, payee: null, account: null });
   check(nulls.ok && nulls.data.payee === null && nulls.data.account === null, 'payee and account accept null (clear)');
   const d = where(schedulesUpdate, { id: SID });
   check(d.ok && d.data.resetNextDate === false, 'resetNextDate defaults to false');
   check(rejectedWith(schedulesUpdate, { id: SID, amountOp: 'between' }, 'invalid_value at amountOp'), 'an unknown amountOp is invalid_value at amountOp');
+}
+
+// #527: isbetween takes a { num1, num2 } range, every other op a number. The refusals are
+// custom issues at amount whose message names the fix.
+const messageOf = (tool, input) => {
+  const r = tool.inputSchema.safeParse(input);
+  return r.success ? '' : r.error.issues.map((i) => i.message).join(' | ');
+};
+console.log('\n[#527] schedules_create: amount and amountOp must fit together');
+{
+  const base = { name: 'MCP-Schedule', account: ACC, date: '2026-01-05' };
+  const refusals = [
+    [{ amountOp: 'isbetween', amount: -5000 }, 'num1, num2', 'a scalar isbetween'],
+    [{ amount: { num1: 1, num2: 2 } }, 'isbetween', 'a range with amountOp omitted (defaults to is)'],
+    [{ amount: { num1: 1, num2: 2 }, amountOp: 'isapprox' }, 'isbetween', 'a range with isapprox'],
+    [{ amount: { num1: 1, num2: 2 }, amountOp: 'is' }, 'isbetween', 'a range with is'],
+    [{ amountOp: 'isbetween' }, 'num1, num2', 'isbetween with no amount'],
+  ];
+  for (const [extra, needle, label] of refusals) {
+    check(rejectedWith(schedulesCreate, { ...base, ...extra }, 'custom at amount'), `${label} is custom at amount`, where(schedulesCreate, { ...base, ...extra }).issues.join(','));
+    check(messageOf(schedulesCreate, { ...base, ...extra }).includes(needle), `${label}: the message names ${needle}`);
+  }
+  const range = where(schedulesCreate, { ...base, amountOp: 'isbetween', amount: { num1: -10000, num2: -5000 } });
+  check(range.ok && range.data.amount.num1 === -10000 && range.data.amount.num2 === -5000, 'a range with isbetween parses and is carried through');
+  const scalar = where(schedulesCreate, { ...base, amount: -5000 });
+  check(scalar.ok && scalar.data.amountOp === 'is', 'a scalar with amountOp omitted still parses as is');
+  for (const [bad, label] of [[{ num1: 1 }, 'a range missing num2'], [{ num1: 1.5, num2: 2 }, 'a fractional bound'], [{ num1: '1', num2: 2 }, 'a string bound']]) {
+    check(rejectedWith(schedulesCreate, { ...base, amountOp: 'isbetween', amount: bad }, 'invalid_union at amount'), `${label} is invalid_union at amount`);
+  }
+  // A union failure must name both shapes, not the bare "Invalid input" (#527 review).
+  for (const [bad, label] of [[12.5, 'a fractional number'], ['5000', 'a numeric string'], [{ num1: 1 }, 'a range missing num2']]) {
+    const msg = messageOf(schedulesCreate, { ...base, amount: bad });
+    check(msg.includes('integer cents') && msg.includes('num1, num2'), `${label}: the union message names both accepted shapes`, msg);
+    check(messageOf(schedulesUpdate, { id: '44444444-4444-4444-4444-444444444444', amount: bad }).includes('integer cents'), `${label}: the update tool says the same`);
+  }
+  // What the caller sees is the central formatter's output, not the raw issue: pin that it
+  // keeps the union message rather than rendering the branches.
+  const r = schedulesCreate.inputSchema.safeParse({ ...base, amount: 12.5 });
+  const formatted = r.success ? '' : formatZodError(r.error, schedulesCreate.inputSchema);
+  check(formatted.includes('amount: amount must be integer cents'), 'the formatted error carries the union message at its path', formatted);
+  const extraKey = where(schedulesCreate, { ...base, amountOp: 'isbetween', amount: { num1: 1, num2: 2, extra: 1 } });
+  check(!extraKey.ok && extraKey.issues.includes('unrecognized_keys at amount'), 'an extra key in the range is unrecognized_keys at amount', extraKey.issues.join(','));
+}
+
+console.log('\n[#527] schedules_update: the input alone decides only when both fields are given');
+{
+  const SID = '44444444-4444-4444-4444-444444444444';
+  check(rejectedWith(schedulesUpdate, { id: SID, amountOp: 'isbetween', amount: -5000 }, 'custom at amount'), 'both given, scalar isbetween is custom at amount');
+  check(rejectedWith(schedulesUpdate, { id: SID, amountOp: 'is', amount: { num1: 1, num2: 2 } }, 'custom at amount'), 'both given, a range with is is custom at amount');
+  check(where(schedulesUpdate, { id: SID, amountOp: 'isbetween', amount: { num1: 1, num2: 2 } }).ok, 'both given and matching parses');
+  check(where(schedulesUpdate, { id: SID, amountOp: 'isbetween' }).ok, 'amountOp alone parses (the adapter guard decides against the stored row)');
+  check(where(schedulesUpdate, { id: SID, amount: { num1: 1, num2: 2 } }).ok, 'amount alone parses (the adapter guard decides against the stored row)');
+}
+
+console.log('\n[#527] tools/list publishes the union for both tools');
+{
+  const { z } = await import('zod');
+  for (const [name, tool] of [['schedules_create', schedulesCreate], ['schedules_update', schedulesUpdate]]) {
+    const amount = z.toJSONSchema(tool.inputSchema).properties.amount;
+    const branches = amount?.anyOf ?? [];
+    const obj = branches.find((b) => b.type === 'object');
+    check(branches.some((b) => b.type === 'integer'), `${name}: amount has an integer branch`, JSON.stringify(amount));
+    check(obj && JSON.stringify([...(obj.required ?? [])].sort()) === '["num1","num2"]' && obj.additionalProperties === false, `${name}: amount has a strict { num1, num2 } branch`, JSON.stringify(obj));
+    check(String(amount?.description ?? '').includes('isbetween'), `${name}: the amount description mentions isbetween`);
+  }
 }
 
 if (failures > 0) { console.error(`\n${failures} check(s) failed`); process.exit(1); }

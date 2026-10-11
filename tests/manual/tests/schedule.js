@@ -7,7 +7,9 @@ import { fail } from '../assert.js';
  * Covers:
  *   positive: list • create one-off • create recurring • update name
  *             update with resetNextDate • delete created schedule
+ *             isbetween range round-trip (#527)
  *   negative: delete non-existent UUID (expect error, not crash)
+ *             scalar amount with isbetween refused (#527)
  *
  * Naming pattern: MCP-Schedule-{timestamp}: matched by cleanup.js
  *
@@ -207,6 +209,55 @@ export async function scheduleTests(client, context) {
       }
     } catch (err) {
       fail(`delete recurring failed: ${err.message}`);
+    }
+  }
+
+  // ── 9b. #527: an isbetween range round-trips; a scalar isbetween is refused ─
+  console.log('\nCreating an isbetween range schedule (#527)...');
+  {
+    let rangeId;
+    try {
+      const created = await callTool('actual_schedules_create', {
+        name: `MCP-Schedule-Range-${timestamp}`,
+        date: '2026-06-15',
+        amount: { num1: -10000, num2: -5000 },
+        amountOp: 'isbetween',
+        posts_transaction: false,
+      });
+      rangeId = created?.id ?? created?.result?.id ?? created;
+      const after = await callTool('actual_schedules_get', {});
+      const all = after?.schedules ?? after?.result?.schedules ?? after ?? [];
+      const row = Array.isArray(all) ? all.find(s => s.id === rangeId) : null;
+      if (row?.amountOp === 'isbetween' && row?.amount?.num1 === -10000 && row?.amount?.num2 === -5000) {
+        console.log('  ✓ range schedule reads back as isbetween { num1: -10000, num2: -5000 }');
+      } else {
+        fail(`range read-back: unexpected row: ${JSON.stringify(row).slice(0, 160)}`);
+      }
+    } catch (err) {
+      fail(`create range schedule failed: ${err.message}`);
+    } finally {
+      if (typeof rangeId === 'string') {
+        try { await callTool('actual_schedules_delete', { id: rangeId }); } catch (err) { fail(`delete range schedule failed: ${err.message}`); }
+      }
+    }
+
+    console.log('NEGATIVE: scalar amount with amountOp isbetween (#527)...');
+    try {
+      const bad = await callTool('actual_schedules_create', {
+        name: `MCP-Schedule-Scalar-${timestamp}`,
+        date: '2026-06-15',
+        amount: -5000,
+        amountOp: 'isbetween',
+        posts_transaction: false,
+      });
+      fail(`Expected a refusal but the tool returned: ${JSON.stringify(bad).slice(0, 120)}`);
+    } catch (err) {
+      const msg = err.message || String(err);
+      if (msg.includes('num1, num2')) {
+        console.log(`  ✓ scalar isbetween refused: ${msg.slice(0, 120)}`);
+      } else {
+        fail(`Threw, but the message does not name the range form: ${msg.slice(0, 120)}`);
+      }
     }
   }
 

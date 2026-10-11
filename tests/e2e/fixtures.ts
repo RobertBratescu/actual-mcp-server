@@ -165,7 +165,13 @@ export type Fixtures = {
     /** Omit the action's `op` field, which is a supported shorthand this suite covers. */
     withoutOp?: boolean;
   }) => Promise<RuleRef>;
-  makeSchedule: (opts?: { name?: string; date?: string; amount?: number }) => Promise<ScheduleRef>;
+  makeSchedule: (opts?: {
+    name?: string;
+    date?: string;
+    /** A number for 'is' and 'isapprox', or a { num1, num2 } range for 'isbetween' (#527). */
+    amount?: number | { num1: number; num2: number };
+    amountOp?: 'is' | 'isapprox' | 'isbetween';
+  }) => Promise<ScheduleRef>;
 };
 
 /**
@@ -461,7 +467,7 @@ export const test = base.extend<Fixtures, WorkerFixtures>({
         name,
         date: opts.date ?? '2026-06-15',
         amount: opts.amount ?? -5000,
-        amountOp: 'is',
+        amountOp: opts.amountOp ?? 'is',
         posts_transaction: false,
       });
       const id = (typeof data === 'string' ? data : data?.id) as string;

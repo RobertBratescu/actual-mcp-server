@@ -3,6 +3,7 @@ import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
 import { CommonSchemas } from '../lib/schemas/common.js';
 import { RecurConfigSchema } from '../lib/schemas/recur.js';
+import { ScheduleAmountSchema, amountOpMismatch, ISBETWEEN_NEEDS_RANGE } from '../lib/schemas/schedule-amount.js';
 
 const InputSchema = z.object({
   name: z.string().optional()
@@ -11,8 +12,8 @@ const InputSchema = z.object({
     .describe('Payee UUID'),
   account: CommonSchemas.accountId.optional()
     .describe('Account UUID. If omitted the schedule is not tied to an account'),
-  amount: z.number().int().optional()
-    .describe('Amount in cents, negative = expense'),
+  amount: ScheduleAmountSchema.optional()
+    .describe('Amount in cents, negative = expense. A number, or { num1, num2 } only with amountOp isbetween (order does not matter)'),
   amountOp: z.enum(['is', 'isapprox', 'isbetween']).optional().default('is')
     .describe('How to match the amount'),
   date: z.union([
@@ -23,6 +24,12 @@ const InputSchema = z.object({
   ]).describe('YYYY-MM-DD for one-off, RecurConfig object for recurring. Required.'),
   posts_transaction: z.boolean().optional().default(false)
     .describe('Auto-post a transaction on each occurrence'),
+}).superRefine((input, ctx) => {
+  // #527: refused here, before any upstream call; see src/lib/schemas/schedule-amount.ts.
+  const message = input.amount === undefined
+    ? (input.amountOp === 'isbetween' ? ISBETWEEN_NEEDS_RANGE : null)
+    : amountOpMismatch(input.amountOp, input.amount);
+  if (message) ctx.addIssue({ code: 'custom', path: ['amount'], message });
 });
 
 const tool: ToolDefinition = {
