@@ -26,15 +26,24 @@ Small, independent follow-ups that code reviews below the fix threshold turned i
 Outcome (2026-10-09): done. All 15 tickets shipped in v0.22.19, released with dual-transport evidence. The phase review split #525 and #505 and created #532 (one shared comment stripper) and #533; nothing was dropped. The bounded review of the phase found no high or medium defects, and its lows went to Backlog as #535 to #541 rather than back into this phase.
 
 ## Phase: Write-path verification
-state: open
+state: done
 plan: docs/plans/write-path-verification.md
 
 `@actual-app/api` 26.9.0 and 26.10.0 return from transaction update and delete without waiting for the batch update to finish, so a read straight after a write can miss it. #489 closed this race only for split conversion. This phase starts by measuring whether the other write shapes actually miss on a live budget. It fixes only the shapes that reproduce, and it tightens the #489 poll and its tests. It sits after the hardening pass because it needs live measurement and a dual-transport run, while the hardening work needs neither.
 
+Outcome (2026-10-11): done. The #493 measurement found the upstream race real at the raw API layer (30/30 reads missed for every shape) but not through the server (0/20), because every adapter drain ends in `api.sync()`, which takes longer than the slowest write takes to land. So no new read-back code shipped, and #493 closed as not reproducible with the numbers. #494 (poll bounded by `ACTUAL_OP_TIMEOUT_MS`), #495 (partial split visibility test), #538 (batch deadline) and #544 (rate-limit outcome wording) shipped in v0.22.25 to v0.22.28 with dual-transport evidence. No work was skipped and no follow-up tickets were needed.
+
 ## Phase: API coverage and schedules
-state: planned
+state: open
+plan: docs/plans/api-coverage-and-schedules.md
 
 Close the gaps between what `@actual-app/api` offers and what the tools expose. Monthly schedule patterns (last day, nth weekday) cannot be created today. The api-surface-drift lane reports each new uncovered method (`mergeTransactions` and `setPreference` arrived with 26.10.0), and each one needs a decision: build a tool, or accept the gap in `docs/audit/api-coverage-baseline.json` with a reason. It is last because nothing here is reported as blocking a user.
+
+## Phase: Session and transport hygiene
+state: planned
+plan:
+
+Split from "Backlog": Four gate-ready lows from the v0.22.18 and v0.22.19 reviews had no phase that would ever schedule them: they are about HTTP session bookkeeping, transport error logging and OIDC refresh-token guidance, not decisions deferred on purpose. Grouping them gives them a slot after API coverage and schedules.
 
 ## Phase: Backlog
 state: backlog
