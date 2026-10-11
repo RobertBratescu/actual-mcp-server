@@ -34,10 +34,12 @@ plan: docs/plans/write-path-verification.md
 Outcome (2026-10-11): done. The #493 measurement found the upstream race real at the raw API layer (30/30 reads missed for every shape) but not through the server (0/20), because every adapter drain ends in `api.sync()`, which takes longer than the slowest write takes to land. So no new read-back code shipped, and #493 closed as not reproducible with the numbers. #494 (poll bounded by `ACTUAL_OP_TIMEOUT_MS`), #495 (partial split visibility test), #538 (batch deadline) and #544 (rate-limit outcome wording) shipped in v0.22.25 to v0.22.28 with dual-transport evidence. No work was skipped and no follow-up tickets were needed.
 
 ## Phase: API coverage and schedules
-state: open
+state: done
 plan: docs/plans/api-coverage-and-schedules.md
 
 Close the gaps between what `@actual-app/api` offers and what the tools expose. Monthly schedule patterns (last day, nth weekday) cannot be created today. The api-surface-drift lane reports each new uncovered method (`mergeTransactions` and `setPreference` arrived with 26.10.0), and each one needs a decision: build a tool, or accept the gap in `docs/audit/api-coverage-baseline.json` with a reason. It is last because nothing here is reported as blocking a user.
+
+Outcome (2026-10-11): done. All four planned tickets shipped in v0.22.31 with dual-transport evidence: #515 (setPreference accepted as a gap), #527 (isbetween takes a { num1, num2 } range, measured live before shipping), #478 (monthly patterns) and #514 (actual_transactions_merge, tool count 83 to 84). The drift lane reports no unaccepted method at @actual-app/api 26.10.0. One change of shape: the two transfer merge cases run in the live suite instead of docker E2E, because that stack runs NODE_ENV=test, where upstream deadlocks a transfer merge. #547 (a payee-less schedule never links) surfaced during #527 and went to Backlog.
 
 ## Phase: Session and transport hygiene
 state: planned
