@@ -132,6 +132,8 @@ const DESTRUCTIVE = new Set<string>([
   'actual_schedules_delete',
   'actual_tags_delete',
   'actual_transactions_delete',
+  // #514: deletes the transaction upstream drops (and a transfer counterpart). Not idempotent: a repeat is refused.
+  'actual_transactions_merge',
   // THE NON-OBVIOUS ONE. `fields.subtransactions` (CommonSchemas, `.strict()`) has no `id`,
   // so upstream's `makeChild` mints a fresh UUID for every child and `diffItems` tombstones
   // every existing one. Editing one amount on a six-way split DELETES all six rows and

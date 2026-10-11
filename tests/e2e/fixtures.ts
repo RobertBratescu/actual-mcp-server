@@ -158,6 +158,8 @@ export type Fixtures = {
     notes?: string;
     payee?: string;
     category?: string;
+    /** #514: an imported_id marks the row as bank-imported, which upstream's merge keeps over a manual one. */
+    imported_id?: string;
   }) => Promise<TransactionRef>;
   makeRule: (opts: {
     marker?: string;
@@ -421,6 +423,7 @@ export const test = base.extend<Fixtures, WorkerFixtures>({
       };
       if (opts.payee) args.payee = opts.payee;
       if (opts.category) args.category = opts.category;
+      if (opts.imported_id) args.imported_id = opts.imported_id;
 
       const created = await mcp.call('actual_transactions_create', args);
       // transactions_create returns the id for a single create. Fall back to a

@@ -136,6 +136,7 @@ console.log('Running generated tools smoke tests');
     reopenAccount: { outcome: 'reopened', name: 'Cash' },
     getAccountBalance: 12345,
     deleteTransaction: null,
+    mergeTransactions: { keptId: '22222222-2222-4222-8222-222222222222', deletedId: '11111111-1111-4111-8111-111111111111' },
     updateTransaction: null,
     updateTransactionBatch: { succeeded: [{ id: '00000000-0000-0000-0000-000000000001' }], failed: [] },
     // #305: is_parent + amount let the transactions_update split example pass the
@@ -222,6 +223,7 @@ console.log('Running generated tools smoke tests');
   if (name.includes('account_flow_summary')) inputExample.startDate = '2025-01-01', inputExample.endDate = '2025-01-31', inputExample.accountIds = ['a1'];
   if (name.includes('recurring_expenses_summary')) inputExample.months = 12; // #426: months alone satisfies the startDate-XOR-months rule; minOccurrences/includeInactive default
   if (name.includes('transactions_get')) inputExample.accountId = 'a1'; // matches getAccounts stub { id: 'a1' } — nil-UUID would hit not-found path and return { error } without result
+  if (name.includes('transactions_merge')) inputExample.ids = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
   if (name.includes('transactions_delete')) inputExample.id = '00000000-0000-0000-0000-000000000001';
   if (name.includes('transactions_update') && !name.includes('batch')) inputExample.id = '00000000-0000-0000-0000-000000000001', inputExample.fields = { notes: 'test', subtransactions: [{ amount: -200 }, { amount: -100 }] }; // #305: edit an existing split (-300 per runQuery stub)
   if (name.includes('transactions_update_batch')) inputExample.updates = [{ id: '00000000-0000-0000-0000-000000000001', fields: { notes: 'batch-test' } }];
@@ -331,6 +333,14 @@ console.log('Running generated tools smoke tests');
         'budgets_setCarryover'];
       if (successTools.includes(n)) {
         if (!res || res.success !== true) shapeErr(`expected success=true`);
+      }
+
+      // #514: actual_transactions_merge reports which transaction survived
+      if (n === 'transactions_merge') {
+        const m = res?.result; // createTool wraps its return value in { result }
+        if (m?.success !== true) shapeErr('expected result.success=true');
+        if (typeof m?.keptId !== 'string') shapeErr('expected result.keptId string');
+        if (typeof m?.deletedId !== 'string') shapeErr('expected result.deletedId string');
       }
 
       // #516: actual_budget_updates_batch reports per-item verdicts, not { success }

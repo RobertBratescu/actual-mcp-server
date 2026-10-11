@@ -1,5 +1,5 @@
 /**
- * Comprehensive Docker E2E Tests - ALL 83 TOOLS
+ * Comprehensive Docker E2E Tests - ALL 84 TOOLS
  *
  * Tests every tool with success and error scenarios.
  *
@@ -15,7 +15,7 @@
 import { test, expect, today, currentMonth, uniqueSuffix, CLEANUP_ORDER, isStdio } from './fixtures.js';
 import { DEFAULT_MCP_SERVER_URL, HTTP_PATH } from '../shared/e2e-helpers.js';
 
-test.describe('Docker E2E - ALL 83 TOOLS', () => {
+test.describe('Docker E2E - ALL 84 TOOLS', () => {
   // ==================== SERVER INFO ====================
   test('actual_server_info - should return server info', async ({ mcp }) => {
     const data = await mcp.call('actual_server_info');
@@ -1801,6 +1801,148 @@ test.describe('Docker E2E - ALL 83 TOOLS', () => {
 
   test('actual_get_context - should reject an out-of-range payeeLimit', async ({ mcp }) => {
     await expect(mcp.call('actual_get_context', { payeeLimit: 0 })).rejects.toThrow(/payeeLimit/i);
+  });
+
+  // ==================== #514: actual_transactions_merge ====================
+  // Upstream keeps the row with imported_id (else imported_payee, else the earlier date, else the
+  // SECOND id) and fills only its EMPTY fields from the dropped one, so every row expected to be
+  // KEPT is created with notes: '' (makeTransaction otherwise sends generated notes, and the kept
+  // row would never carry the dropped one's). Importing a bank row cannot build a pair: a row
+  // matching a nearby manual transaction reconciles into it, but create with imported_id does.
+  const mergeRows = async (mcp: any, acct: string) => {
+    const d = await mcp.call('actual_transactions_get', { accountId: acct });
+    return (Array.isArray(d) ? d : (d?.result ?? [])) as any[];
+  };
+
+  test('actual_transactions_merge - the imported row wins and carries the manual notes and category', async ({ mcp, makeAccount, makeCategoryGroup, makeCategory, makeTransaction }) => {
+    const group = await makeCategoryGroup();
+    const category = await makeCategory({ group });
+    const account = await makeAccount();
+    // The manual row is EARLIER and passed SECOND, so both fallbacks (earlier date, second id)
+    // would keep it: only the imported_id rule can make the imported row win.
+    const manual = await makeTransaction({ account, amount: -2500, date: '2026-10-01', notes: 'lunch', category: category.id });
+    const imported = await makeTransaction({ account, amount: -2500, date: '2026-10-03', notes: '', imported_id: `E2E-imp-${uniqueSuffix()}` });
+
+    const res = await mcp.call('actual_transactions_merge', { ids: [imported.id, manual.id] });
+    expect(res?.success).toBe(true);
+    expect(res?.keptId).toBe(imported.id);
+    expect(res?.deletedId).toBe(manual.id);
+
+    const rows = await mergeRows(mcp, account.id);
+    expect(rows.find((t: any) => t?.id === manual.id)).toBeUndefined();
+    const kept = rows.filter((t: any) => t?.id === imported.id);
+    expect(kept).toHaveLength(1);
+    expect(kept[0].notes).toBe('lunch');
+    expect(kept[0].category).toBe(category.id);
+  });
+
+  test('actual_transactions_merge - without imported_id the earlier date is kept', async ({ mcp, makeAccount, makeTransaction }) => {
+    const account = await makeAccount();
+    const earlier = await makeTransaction({ account, amount: -1800, date: '2026-10-01', notes: '' });
+    const later = await makeTransaction({ account, amount: -1800, date: '2026-10-03', notes: 'dropped-note' });
+
+    // The earlier row is passed FIRST, so the equal-date fallback (second id) would keep the
+    // later one: only the date rule can make this pass.
+    const res = await mcp.call('actual_transactions_merge', { ids: [earlier.id, later.id] });
+    expect(res?.keptId).toBe(earlier.id);
+    expect(res?.deletedId).toBe(later.id);
+
+    const rows = await mergeRows(mcp, account.id);
+    expect(rows.find((t: any) => t?.id === later.id)).toBeUndefined();
+    expect(rows.filter((t: any) => t?.id === earlier.id)).toHaveLength(1);
+    expect(rows.find((t: any) => t?.id === earlier.id)?.notes).toBe('dropped-note');
+  });
+
+  test('actual_transactions_merge - a split parent merges into the plain row, which gets the children', async ({ mcp, makeAccount, makeCategoryGroup, makeCategory, makeTransaction }) => {
+    const group = await makeCategoryGroup();
+    const category = await makeCategory({ group });
+    const account = await makeAccount();
+    const plain = await makeTransaction({ account, amount: -5000, date: '2026-10-01', category: category.id });
+    const split = await makeTransaction({ account, amount: -5000, date: '2026-10-03' });
+    await mcp.call('actual_transactions_update', {
+      id: split.id,
+      fields: { subtransactions: [{ amount: -3000, category: category.id }, { amount: -2000, category: category.id }] },
+    });
+
+    const res = await mcp.call('actual_transactions_merge', { ids: [plain.id, split.id] });
+    expect(res?.keptId).toBe(plain.id);
+    expect(res?.deletedId).toBe(split.id);
+
+    const rows = await mergeRows(mcp, account.id);
+    const parents = rows.filter((t: any) => !t?.parent_id && !t?.is_child);
+    expect(parents).toHaveLength(1);
+    expect(parents[0].id).toBe(plain.id);
+    expect((parents[0].subtransactions ?? []).map((c: any) => c.amount).sort()).toEqual([-3000, -2000].sort());
+    expect(parents[0].category ?? null).toBeNull();
+  });
+
+  // #514: the two transfer cases are SKIPPED here because this stack runs the server with
+  // NODE_ENV=test (docker-compose.test.yaml). In that mode upstream's scheduleFullSync AWAITS a
+  // full sync after every write instead of debouncing it. A transfer merge issues concurrent
+  // writes (setTransfers), the merkle check then forces a resync that receives messages, and
+  // receiveMessages queues on runMutator, which the merge itself still holds: a deadlock that
+  // ends in ACTUAL_OP_TIMEOUT and a stalled write queue. Controlled on 2026-10-11 against the
+  // raw api: the same merge took 2054 ms without NODE_ENV=test and hung with it. Production
+  // (the Dockerfile sets NODE_ENV=production) and stdio clients (NODE_ENV unset) are not
+  // affected, so both cases are covered by blocks in tests/manual/tests/transaction.js in the
+  // live dual-transport run instead. Un-skip both if this stack ever stops using NODE_ENV=test.
+  test.skip('actual_transactions_merge - two transfers leave one row in each account, linked', async ({ mcp, makeAccount }) => {
+    const src = await makeAccount({ name: `E2E-MergeXfer-Src-${uniqueSuffix()}` });
+    const dst = await makeAccount({ name: `E2E-MergeXfer-Dst-${uniqueSuffix()}` });
+    for (const date of ['2026-10-01', '2026-10-03']) {
+      const created = await mcp.call('actual_transfers_create', { from_account: src.id, to_account: dst.id, amount: 3000, date });
+      expect(created?.success).toBeTruthy();
+    }
+    const debits = (await mergeRows(mcp, src.id)).filter((t: any) => t?.amount === -3000);
+    expect(debits).toHaveLength(2);
+
+    const res = await mcp.call('actual_transactions_merge', { ids: [debits[0].id, debits[1].id] });
+    expect(res?.success).toBe(true);
+
+    const srcAfter = (await mergeRows(mcp, src.id)).filter((t: any) => t?.amount === -3000);
+    const dstAfter = (await mergeRows(mcp, dst.id)).filter((t: any) => t?.amount === 3000);
+    expect(srcAfter).toHaveLength(1);
+    expect(srcAfter[0].id).toBe(res.keptId);
+    expect(dstAfter).toHaveLength(1);
+    expect(dstAfter[0].transfer_id).toBe(srcAfter[0].id);
+  });
+
+  test.skip('actual_transactions_merge - a plain row merged with a transfer to an on-budget account loses its category', async ({ mcp, makeAccount, makeCategoryGroup, makeCategory, makeTransaction }) => {
+    const group = await makeCategoryGroup();
+    const category = await makeCategory({ group });
+    const src = await makeAccount({ name: `E2E-MergeCat-Src-${uniqueSuffix()}` });
+    const dst = await makeAccount({ name: `E2E-MergeCat-Dst-${uniqueSuffix()}` });
+    const plain = await makeTransaction({ account: src, amount: -4000, date: '2026-10-01', category: category.id });
+    const created = await mcp.call('actual_transfers_create', { from_account: src.id, to_account: dst.id, amount: 4000, date: '2026-10-03' });
+    expect(created?.success).toBeTruthy();
+    const debit = (await mergeRows(mcp, src.id)).find((t: any) => t?.amount === -4000 && t?.id !== plain.id);
+    expect(debit?.transfer_id).toBeTruthy();
+
+    const res = await mcp.call('actual_transactions_merge', { ids: [plain.id, debit.id] });
+    expect(res?.success).toBe(true);
+
+    const rows = (await mergeRows(mcp, src.id)).filter((t: any) => t?.amount === -4000);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].category ?? null).toBeNull();
+    expect(rows[0].transfer_id).toBeTruthy();
+  });
+
+  test('actual_transactions_merge - ERROR: different amounts, different accounts, unknown id and the same id twice change nothing', async ({ mcp, makeAccount, makeTransaction }) => {
+    const acctA = await makeAccount();
+    const acctB = await makeAccount();
+    const x = await makeTransaction({ account: acctA, amount: -1000 });
+    const y = await makeTransaction({ account: acctA, amount: -1200 });
+    const z = await makeTransaction({ account: acctB, amount: -1000 });
+    const missing = '99999999-9999-4999-8999-999999999999';
+
+    await expect(mcp.call('actual_transactions_merge', { ids: [x.id, y.id] })).rejects.toThrow(/different amounts[\s\S]*-1000[\s\S]*-1200/i);
+    await expect(mcp.call('actual_transactions_merge', { ids: [x.id, z.id] })).rejects.toThrow(/different accounts/i);
+    await expect(mcp.call('actual_transactions_merge', { ids: [x.id, missing] })).rejects.toThrow(new RegExp(`${missing}[\\s\\S]*actual_transactions_get`));
+    await expect(mcp.call('actual_transactions_merge', { ids: [x.id, x.id] })).rejects.toThrow(/DIFFERENT transaction ids/);
+
+    const rowsA = (await mergeRows(mcp, acctA.id)).map((t: any) => t.id);
+    expect(rowsA).toEqual(expect.arrayContaining([x.id, y.id]));
+    expect((await mergeRows(mcp, acctB.id)).map((t: any) => t.id)).toContain(z.id);
   });
 
   // ==================== DELETE OPERATIONS (6 tools) ====================

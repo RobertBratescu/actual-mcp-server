@@ -75,6 +75,7 @@ async function expectCallError(tool, input, label) {
     rules_update_tool,
     transactions_create_tool,
     entities_search_tool,
+    transactions_merge_tool,
   ] = await Promise.all([
     import('../../dist/src/tools/rules_create.js').then(m => m.default),
     import('../../dist/src/tools/rules_create_batch.js').then(m => m.default),
@@ -97,6 +98,7 @@ async function expectCallError(tool, input, label) {
     import('../../dist/src/tools/rules_update.js').then(m => m.default),
     import('../../dist/src/tools/transactions_create.js').then(m => m.default),
     import('../../dist/src/tools/entities_search.js').then(m => m.default),
+    import('../../dist/src/tools/transactions_merge.js').then(m => m.default),
   ]);
 
   let failures = 0;
@@ -451,6 +453,27 @@ async function expectCallError(tool, input, label) {
   if (!expectParseError(payees_merge_tool,
     { targetId: '11111111-1111-4111-8111-111111111111', mergeIds: ['22222222-2222-4222-8222-222222222222', 'p3'] },
     'a non-UUID inside mergeIds is rejected')) fail();
+
+  // ── actual_transactions_merge (#514) ──────────────────────────────────────
+  console.log('\n[actual_transactions_merge: exactly two DIFFERENT UUID ids]');
+  const MA = '11111111-1111-4111-8111-111111111111';
+  const MB = '22222222-2222-4222-8222-222222222222';
+  const MC = '33333333-3333-4333-8333-333333333333';
+  const mergeMsg = (input) => {
+    try { transactions_merge_tool.inputSchema.parse(input); return null; } catch (e) { return String(e.message); }
+  };
+  if (!expectParseError(transactions_merge_tool, {}, 'missing ids rejected')) fail();
+  if (!expectParseError(transactions_merge_tool, { ids: [MA] }, 'one id rejected')) fail();
+  if (!expectParseError(transactions_merge_tool, { ids: [MA, MB, MC] }, 'three ids rejected')) fail();
+  if (!expectParseError(transactions_merge_tool, { ids: [MA, 'not-a-uuid'] }, 'non-UUID id rejected')) fail();
+  if (!expectParseError(transactions_merge_tool, { ids: [MA, MA] }, 'the same id twice rejected')) fail();
+  if (!(mergeMsg({ ids: [MA, MA] }) || '').includes('ids must be two DIFFERENT transaction ids')) {
+    console.error('  FAIL: same-id message is not actionable'); fail();
+  } else console.log('  ✓ same-id message says ids must be two DIFFERENT transaction ids');
+  if (!(mergeMsg({ ids: [MA, 'not-a-uuid'] }) || '').includes('Invalid transaction ID format')) {
+    console.error('  FAIL: non-UUID message does not name the format'); fail();
+  } else console.log('  ✓ non-UUID message names the expected format');
+  if (!expectParseOk(transactions_merge_tool, { ids: [MA, MB] }, 'two distinct UUIDs accepted')) fail();
 
   // ── actual_get_id_by_name (Q1) ────────────────────────────────────────────
   console.log('\n[actual_get_id_by_name — required type enum + non-empty name]');

@@ -315,8 +315,9 @@ await check('WRITE_CAPABLE matches the adapter call graph for every registered t
   assert.deepStrictEqual(problems, []);
 });
 
-await check('WRITE_CAPABLE is pinned at 47 and includes the four queue-bypassing mutators', () => {
-  assert.strictEqual(WRITE_CAPABLE.size, 47);
+await check('WRITE_CAPABLE is pinned at 48 and includes the four queue-bypassing mutators', () => {
+  // #514: 47 to 48 with actual_transactions_merge.
+  assert.strictEqual(WRITE_CAPABLE.size, 48);
   for (const n of NON_QUEUE_MUTATORS) assert.ok(WRITE_CAPABLE.has(n), `${n} must be write-capable`);
 });
 

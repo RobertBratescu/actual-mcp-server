@@ -685,6 +685,151 @@ export async function transactionTests(client, context) {
     if (recPayeeId) await callTool("actual_payees_delete", { id: recPayeeId }).catch(() => {});
   }
 
+  // #514: actual_transactions_merge on a disposable account. actual_transactions_create returns no
+  // id in the runner, so both rows are located by listing the account and told apart by DATE.
+  console.log("\nTesting transactions_merge...");
+  let mergeAcctId = null;
+  try {
+    const mergeAcct = await callTool("actual_accounts_create", { name: `MCP-Merge-${timestamp}`, balance: 0 });
+    mergeAcctId = mergeAcct.id || mergeAcct.result || mergeAcct;
+    const listMerge = async () => {
+      const r = await callTool("actual_transactions_filter", { accountId: mergeAcctId });
+      return Array.isArray(r) ? r : (r.result || []);
+    };
+    // Rows to be KEPT carry empty notes: upstream fills only empty fields from the dropped row.
+    await callTool("actual_transactions_create", { account: mergeAcctId, date: '2026-10-01', amount: -1800, notes: '' });
+    await callTool("actual_transactions_create", { account: mergeAcctId, date: '2026-10-03', amount: -1800, notes: `MCP-Merge-Dropped-${timestamp}` });
+    await callTool("actual_transactions_create", { account: mergeAcctId, date: '2026-10-05', amount: -2000, notes: `MCP-Merge-Other-${timestamp}` });
+    const before = await listMerge();
+    const early = before.find(t => t.date === '2026-10-01' && t.amount === -1800);
+    const late = before.find(t => t.date === '2026-10-03' && t.amount === -1800);
+    const other = before.find(t => t.amount === -2000);
+    if (!early || !late || !other) {
+      fail(`merge: could not locate the three seeded rows (${before.length} found)`);
+    } else {
+      // NEGATIVE first: different amounts are refused naming both amounts, and both rows survive.
+      try {
+        await callTool("actual_transactions_merge", { ids: [early.id, other.id] });
+        fail("merge: different amounts should be refused, but the call succeeded");
+      } catch (err) {
+        const msg = err.message || String(err);
+        if (/different amounts/i.test(msg) && msg.includes('-1800') && msg.includes('-2000')) console.log(`  \u2713 merge [negative]: different amounts refused naming both amounts`);
+        else fail(`merge [negative]: refused, but the message is not actionable: ${msg.slice(0, 160)}`);
+      }
+      const afterRefusal = await listMerge();
+      if (afterRefusal.length === 3) console.log(`  \u2713 merge [negative read-back]: all three rows unchanged`);
+      else fail(`merge [negative read-back]: expected 3 rows, found ${afterRefusal.length}`);
+
+      // POSITIVE: no imported_id on either, so the earlier date is kept. The earlier row is passed
+      // FIRST so the second-id fallback would pick the other one: only the date rule passes this.
+      const res = await callTool("actual_transactions_merge", { ids: [early.id, late.id] });
+      if (res?.success === true && res.keptId === early.id && res.deletedId === late.id) console.log(`  \u2713 merge: the earlier-dated row is kept (keptId=${res.keptId})`);
+      else fail(`merge: expected keptId=${early.id} deletedId=${late.id}, got ${JSON.stringify(res).slice(0, 160)}`);
+      const after = await listMerge();
+      const keptRow = after.find(t => t.id === early.id);
+      if (after.length === 2 && !after.some(t => t.id === late.id) && keptRow?.notes === `MCP-Merge-Dropped-${timestamp}`) {
+        console.log(`  \u2713 merge [read-back]: one of the pair left, carrying the dropped row's notes`);
+      } else {
+        fail(`merge [read-back]: expected 2 rows with the kept one carrying the dropped notes, got ${JSON.stringify(after.map(t => ({ id: t.id, notes: t.notes }))).slice(0, 200)}`);
+      }
+    }
+  } catch (err) {
+    fail(`merge: unexpected error: ${(err.message || String(err)).slice(0, 140)}`);
+  } finally {
+    // accounts_delete removes the account and its transactions in one call.
+    if (mergeAcctId) await callTool("actual_accounts_delete", { id: mergeAcctId }).catch(() => {});
+  }
+
+  // #514: merging two TRANSFERS. The docker E2E skips this path (its server runs NODE_ENV=test,
+  // where upstream deadlocks a transfer merge; see the note in docker-all-tools.e2e.spec.ts), so
+  // this live run, on the production image, is its coverage. Two disposable accounts, deleted after.
+  console.log("\nTesting transactions_merge on two transfers...");
+  let xferSrcId = null;
+  let xferDstId = null;
+  try {
+    const srcAcct = await callTool("actual_accounts_create", { name: `MCP-MergeXfer-Src-${timestamp}`, balance: 0 });
+    xferSrcId = srcAcct.id || srcAcct.result || srcAcct;
+    const dstAcct = await callTool("actual_accounts_create", { name: `MCP-MergeXfer-Dst-${timestamp}`, balance: 0 });
+    xferDstId = dstAcct.id || dstAcct.result || dstAcct;
+    const debitIds = [];
+    for (const date of ['2026-10-01', '2026-10-03']) {
+      const t = await callTool("actual_transfers_create", { from_account: xferSrcId, to_account: xferDstId, amount: 2500, date });
+      const r = t?.result ?? t;
+      if (r?.from_id) debitIds.push(r.from_id);
+    }
+    const list = async (accountId) => {
+      const r = await callTool("actual_transactions_filter", { accountId });
+      return Array.isArray(r) ? r : (r.result || []);
+    };
+    if (debitIds.length !== 2) {
+      fail(`merge transfers: expected two transfer debits, got ${debitIds.length}`);
+    } else {
+      const res = await callTool("actual_transactions_merge", { ids: debitIds });
+      const merged = res?.result ?? res;
+      if (merged?.success === true && debitIds.includes(merged.keptId)) console.log(`  \u2713 merge transfers: merged (keptId=${merged.keptId})`);
+      else fail(`merge transfers: unexpected result ${JSON.stringify(res).slice(0, 160)}`);
+      const srcAfter = (await list(xferSrcId)).filter(t => t.amount === -2500);
+      const dstAfter = (await list(xferDstId)).filter(t => t.amount === 2500);
+      if (srcAfter.length === 1 && dstAfter.length === 1 && srcAfter[0].id === merged?.keptId && dstAfter[0].transfer_id === srcAfter[0].id) {
+        console.log(`  \u2713 merge transfers [read-back]: one row in each account, linked`);
+      } else {
+        fail(`merge transfers [read-back]: expected one linked row per account, got src=${srcAfter.length} dst=${dstAfter.length} link=${dstAfter[0]?.transfer_id === srcAfter[0]?.id}`);
+      }
+    }
+  } catch (err) {
+    fail(`merge transfers: unexpected error: ${(err.message || String(err)).slice(0, 140)}`);
+  } finally {
+    if (xferSrcId) await callTool("actual_accounts_delete", { id: xferSrcId }).catch(() => {});
+    if (xferDstId) await callTool("actual_accounts_delete", { id: xferDstId }).catch(() => {});
+  }
+
+  // #514: a plain categorised row merged with a transfer to an ON-BUDGET account. Upstream keeps
+  // the transfer link and clears the category. Skipped in docker E2E for the same NODE_ENV=test
+  // deadlock, so covered here. Disposable accounts, category group and category, deleted after.
+  console.log("\nTesting transactions_merge of a plain row with a transfer...");
+  let mixSrcId = null;
+  let mixDstId = null;
+  let mixGroupId = null;
+  let mixCatId = null;
+  try {
+    const src = await callTool("actual_accounts_create", { name: `MCP-MergeMix-Src-${timestamp}`, balance: 0 });
+    mixSrcId = src.id || src.result || src;
+    const dst = await callTool("actual_accounts_create", { name: `MCP-MergeMix-Dst-${timestamp}`, balance: 0 });
+    mixDstId = dst.id || dst.result || dst;
+    const group = await callTool("actual_category_groups_create", { name: `MCP-MergeMix-Group-${timestamp}` });
+    mixGroupId = group.id || group.result || group;
+    const cat = await callTool("actual_categories_create", { name: `MCP-MergeMix-Cat-${timestamp}`, group_id: mixGroupId });
+    mixCatId = cat.categoryId || cat.id || cat.result || cat;
+    await callTool("actual_transactions_create", { account: mixSrcId, date: '2026-10-01', amount: -1200, category: mixCatId });
+    const t = await callTool("actual_transfers_create", { from_account: mixSrcId, to_account: mixDstId, amount: 1200, date: '2026-10-03' });
+    const debitId = (t?.result ?? t)?.from_id;
+    const list = async () => {
+      const r = await callTool("actual_transactions_filter", { accountId: mixSrcId });
+      return (Array.isArray(r) ? r : (r.result || [])).filter(x => x.amount === -1200);
+    };
+    const plain = (await list()).find(x => !x.transfer_id);
+    if (!plain || !debitId) {
+      fail(`merge plain+transfer: could not locate the seeded rows (plain=${!!plain} debit=${!!debitId})`);
+    } else if (plain.category !== mixCatId) {
+      fail(`merge plain+transfer: the plain row was not seeded with the category (got ${plain.category})`);
+    } else {
+      await callTool("actual_transactions_merge", { ids: [plain.id, debitId] });
+      const after = await list();
+      if (after.length === 1 && after[0].transfer_id && (after[0].category ?? null) === null) {
+        console.log(`  \u2713 merge plain+transfer [read-back]: one row left, still a transfer, category cleared`);
+      } else {
+        fail(`merge plain+transfer [read-back]: expected one transfer row with no category, got ${JSON.stringify(after.map(x => ({ id: x.id, transfer_id: x.transfer_id, category: x.category }))).slice(0, 200)}`);
+      }
+    }
+  } catch (err) {
+    fail(`merge plain+transfer: unexpected error: ${(err.message || String(err)).slice(0, 140)}`);
+  } finally {
+    if (mixSrcId) await callTool("actual_accounts_delete", { id: mixSrcId }).catch(() => {});
+    if (mixDstId) await callTool("actual_accounts_delete", { id: mixDstId }).catch(() => {});
+    if (mixCatId) await callTool("actual_categories_delete", { id: mixCatId }).catch(() => {});
+    if (mixGroupId) await callTool("actual_category_groups_delete", { id: mixGroupId }).catch(() => {});
+  }
+
   // Teardown: close then delete the dedicated transaction test account.
   // close() must come first: Actual tombstones (hard-deletes) accounts with zero
   // transactions on close(), making them unrecoverable. We need close() to set

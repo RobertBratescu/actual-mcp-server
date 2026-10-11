@@ -61,6 +61,7 @@ export const TOOLSETS = {
     'actual_transactions_update_batch',
     'actual_transactions_delete',
     'actual_transactions_import',
+    'actual_transactions_merge',
     'actual_transfers_create',
   ],
   analysis: [
@@ -229,6 +230,7 @@ export const WRITE_CAPABLE: ReadonlySet<string> = new Set([
   'actual_transactions_create',
   'actual_transactions_delete',
   'actual_transactions_import',
+  'actual_transactions_merge',
   'actual_transactions_update',
   'actual_transactions_update_batch',
   'actual_transfers_create',

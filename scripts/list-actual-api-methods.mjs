@@ -45,6 +45,7 @@ export const API_TO_TOOL = {
   importTransactions: 'actual_transactions_import',
   updateTransaction: 'actual_transactions_update',
   deleteTransaction: 'actual_transactions_delete',
+  mergeTransactions: 'actual_transactions_merge',
   // categories + groups
   getCategories: 'actual_categories_get',
   createCategory: 'actual_categories_create',

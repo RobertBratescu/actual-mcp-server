@@ -48,6 +48,9 @@ const NON_IDEMPOTENT = [
   'rawCloseAccount',
   'rawDeleteCategoryGroup',
   'rawMergePayees',
+  // #514: mergeTransactions deletes the dropped transaction. After a lost response a retry
+  // would meet a deleted id, so it must run once.
+  'rawMergeTransactions',
   // #334: importBudget CREATES a budget file and returns its new id. A retry after
   // a lost response would create a SECOND budget rather than return the first
   // one's id, leaving an orphan the caller never learns about.

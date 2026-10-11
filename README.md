@@ -24,13 +24,13 @@ Actual MCP Server is a [Model Context Protocol](https://modelcontextprotocol.io/
 ┌─────────────┐   MCP/HTTP    ┌──────────────────┐   Actual API   ┌──────────────┐
 │  LibreChat  │ ◄───────────► │  Actual MCP      │ ◄───────────► │   Actual     │
 │  LobeChat   │               │  Server          │               │   Budget     │
-│  (remote)   │               │  (83 tools)      │               │   Server     │
+│  (remote)   │               │  (84 tools)      │               │   Server     │
 └─────────────┘               └──────────────────┘               └──────────────┘
 
 ┌─────────────┐   MCP/stdio   ┌──────────────────┐   Actual API   ┌──────────────┐
 │  Claude     │ ◄───────────► │  Actual MCP      │ ◄───────────► │   Actual     │
 │  Desktop    │               │  Server          │               │   Budget     │
-│  (local)    │               │  (83 tools)      │               │   Server     │
+│  (local)    │               │  (84 tools)      │               │   Server     │
 └─────────────┘               └──────────────────┘               └──────────────┘
 ```
 
@@ -38,14 +38,14 @@ Actual MCP Server is a [Model Context Protocol](https://modelcontextprotocol.io/
 
 Most Actual Budget MCP implementations are simple stdio bridges designed for single-user, local use with Claude Desktop. This project goes further:
 
-- **83 tools, the most comprehensive coverage available.** Accounts, transactions, categories, payees, tags, notes, rules, budgets, batch operations, bank sync, and more. Covers the reachable Actual Budget API with no genuine gaps.
+- **84 tools, the most comprehensive coverage available.** Accounts, transactions, categories, payees, tags, notes, rules, budgets, batch operations, bank sync, and more. Covers the reachable Actual Budget API with no genuine gaps.
 - **HTTP and stdio transport.** Runs as a real remote server for LibreChat/LobeChat (`--http`), or as a direct local process for Claude Desktop (`--stdio`). No Docker or HTTP server is needed for local use.
 - **6 exclusive ActualQL-powered tools.** Search and summarise transactions by month, amount, category, or payee using Actual Budget's native query engine. Aggregated results, no raw data dumped into the AI context window.
 - **Multi-budget switching at runtime.** Configure multiple budget files and let the AI switch between them mid-conversation with `actual_budgets_switch`. Works on both transports: HTTP keys the active budget to the MCP session, and stdio (Claude Desktop, Claude Code, Cursor) gets a synthetic per-process session so a switch is scoped to that process rather than shared globally (#348).
 - **Multi-user ready with OIDC.** Secure every session with JWKS-validated JWTs and per-user budget ACLs. No shared tokens required.
 - **Production-grade reliability on both transports.** HTTP connection pooling (up to 15 concurrent sessions), and a long-lived stdio process that logs in ONCE and reuses that connection for every tool call instead of re-authenticating per call, so Claude Desktop and Claude Code stay fast and a burst of calls no longer risks a per-call login storm against the upstream limiter. Automatic retry with exponential backoff, and a full test suite (unit + E2E + integration).
 
-> **Verified working** with [LibreChat](https://www.librechat.ai/), [LobeChat](https://lobehub.com/home), and [Claude Desktop](https://claude.ai/download). All 83 tools tested end-to-end. Any MCP-compatible client should work.
+> **Verified working** with [LibreChat](https://www.librechat.ai/), [LobeChat](https://lobehub.com/home), and [Claude Desktop](https://claude.ai/download). All 84 tools tested end-to-end. Any MCP-compatible client should work.
 
 ---
 
@@ -182,7 +182,7 @@ Add to `claude_desktop_config.json` (see [docs/guides/MCP_CLIENTS_SETUP.md](docs
 }
 ```
 
-> **No token needed.** stdio runs as a local process owned by your user. The transport itself is the security boundary. All 83 tools are available.
+> **No token needed.** stdio runs as a local process owned by your user. The transport itself is the security boundary. All 84 tools are available.
 >
 > **`MCP_BRIDGE_DATA_DIR` should be an absolute path.** Without one, the data directory resolves relative to wherever the client spawns the process, which can be unpredictable. The directory is created automatically on first run.
 
@@ -308,7 +308,7 @@ For Claude Desktop (stdio), restart Claude after upgrading.
 
 ## Available Tools
 
-**83 tools** across all categories. All tools use the `actual_<category>_<action>` naming convention.
+**84 tools** across all categories. All tools use the `actual_<category>_<action>` naming convention.
 
 ### Accounts (12)
 
@@ -327,9 +327,9 @@ For Claude Desktop (stdio), restart Claude after upgrading.
 | `actual_account_groups_update` | Rename an account group or change its sidebar position. A group that does not exist is refused, writing nothing |
 | `actual_account_groups_delete` | Delete an account group. Its accounts are NOT deleted, they become ungrouped |
 
-### Transactions (16)
+### Transactions (17)
 
-**Standard (6)**
+**Standard (7)**
 
 | Tool | Description |
 |------|-------------|
@@ -339,6 +339,7 @@ For Claude Desktop (stdio), restart Claude after upgrading.
 | `actual_transactions_import` | Import and reconcile transactions |
 | `actual_transactions_update` | Update a transaction, split a plain one in place, or edit the children of an existing split via `subtransactions` |
 | `actual_transactions_delete` | Delete a transaction |
+| `actual_transactions_merge` | Merge two same-account, same-amount transactions (e.g. a bank-imported duplicate and a manual entry). Upstream keeps one (the imported one first) and DELETES the other, filling only the kept row's empty payee, category, notes and schedule and its false cleared and reconciled flags; irreversible |
 
 > **Split transactions:** pass a `subtransactions` array (each child needs an `amount` in integer cents; `category` and `notes` are optional). The child amounts must sum to the parent `amount` (the server does not enforce this, so the tool does). A split parent carries no category of its own: put categories on the children. `actual_transactions_update` with `subtransactions` edits the children of a transaction that is already a split, or splits a plain transaction IN PLACE: it keeps its id, `imported_id` and cleared state, so a bank-synced transaction can be split without breaking import matching. Its own category is cleared, and a child that names no category inherits it. A split child cannot itself be split. Note: `actual_transactions_import` forwards a `subtransactions` array to the API but does NOT apply the sum check, so use `actual_transactions_create` for guaranteed-balanced splits.
 
@@ -556,7 +557,7 @@ All configuration is via environment variables. Copy `.env.example` to `.env` to
 
 ### Reducing the tool surface
 
-All 83 tools are published by default. Chat clients with a small tool budget (Gemini, LibreChat) do better with fewer, so the surface can be narrowed at startup. A tool that is not published is also refused if a client calls it by name, and the refusal names the setting responsible.
+All 84 tools are published by default. Chat clients with a small tool budget (Gemini, LibreChat) do better with fewer, so the surface can be narrowed at startup. A tool that is not published is also refused if a client calls it by name, and the refusal names the setting responsible.
 
 | Toolset | Tools | Contents |
 |---------|-------|----------|
@@ -570,7 +571,7 @@ All 83 tools are published by default. Chat clients with a small tool budget (Ge
 | `query` | 1 | `actual_query_run` (SELECT only) |
 | `admin` | 6 | Budget switching, import, export, bank sync and session management |
 
-Each tool is in exactly one group. The `chat` preset cuts across them and publishes 12 tools: `actual_get_context`, `actual_query_run`, `actual_transactions_create`, `actual_transactions_update`, `actual_transactions_delete`, `actual_transactions_update_batch`, `actual_rules_create`, `actual_rules_create_batch`, `actual_budget_updates_batch`, `actual_budgets_transfer`, `actual_budgets_setAmount` and `actual_budgets_getMonth`. Measured on the `tools/list` payload, all 83 tools are 108,164 bytes and the `chat` preset is 25,949 bytes (about 6.5k tokens saved, a 76% cut).
+Each tool is in exactly one group. The `chat` preset cuts across them and publishes 12 tools: `actual_get_context`, `actual_query_run`, `actual_transactions_create`, `actual_transactions_update`, `actual_transactions_delete`, `actual_transactions_update_batch`, `actual_rules_create`, `actual_rules_create_batch`, `actual_budget_updates_batch`, `actual_budgets_transfer`, `actual_budgets_setAmount` and `actual_budgets_getMonth`. Measured on the `tools/list` payload, all 84 tools are 108,164 bytes and the `chat` preset is 25,949 bytes (about 6.5k tokens saved, a 76% cut).
 
 `MCP_READ_ONLY=true` additionally hides and refuses every write-capable tool (47 of the 83, including `actual_bank_sync`, `actual_budgets_export`, `actual_budgets_switch` and `actual_session_close`), leaving 36. `actual_session_list` stays available under read-only. See [Security and Privacy](docs/SECURITY_AND_PRIVACY.md#tool-surface-mcp_toolsets-and-mcp_read_only).
 
@@ -648,7 +649,7 @@ stdio is the simplest way to connect Claude Desktop directly to Actual Budget. T
 - No auth token. Process ownership is the security boundary.
 - All logs go to stderr so they never corrupt the JSON-RPC framing on stdout
 - The process exits when stdin closes (Claude Desktop shutting down)
-- All 83 tools are available, identical to HTTP mode
+- All 84 tools are available, identical to HTTP mode
 
 **Start manually to verify:**
 
@@ -751,7 +752,7 @@ See [AI Client Setup, OIDC](docs/guides/AI_CLIENT_SETUP.md#oidc-authentication-m
 | Command | What It Tests | Requires Live Server |
 |---------|---------------|---------------------|
 | `npm run build` | TypeScript compilation | No |
-| `npm run test:unit-js` | 83-tool smoke, schema validation, auth ACL | No |
+| `npm run test:unit-js` | 84-tool smoke, schema validation, auth ACL | No |
 | `npm run test:adapter` | Adapter, retry logic, concurrency | No |
 | `npm run test:e2e` | MCP protocol compliance (Playwright) | No |
 | `npm run test:e2e:docker:full` | Full stack integration | Yes (Docker) |

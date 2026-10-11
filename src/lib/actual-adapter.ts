@@ -43,6 +43,7 @@ const {
   updateCategoryGroup: rawUpdateCategoryGroup,
   deleteCategoryGroup: rawDeleteCategoryGroup,
   mergePayees: rawMergePayees,
+  mergeTransactions: rawMergeTransactions,
   getPayeeRules: rawGetPayeeRules,
   holdBudgetForNextMonth: rawHoldBudgetForNextMonth,
   resetBudgetHold: rawResetBudgetHold,
@@ -2587,6 +2588,64 @@ export async function deleteTransaction(id: string): Promise<void> {
     await withConcurrency(() => retry(() => rawDeleteTransaction(id) as Promise<void>, { retries: 0, backoffMs: 200 }));
   });
 }
+/**
+ * #514: merge two transactions via upstream `mergeTransactions`. The PUBLIC api takes the plain
+ * string tuple and returns the id of the KEPT transaction; the `{ id }[]` form belongs to the
+ * internal handler and throws "Invalid field type [object Object]" here. Upstream picks which one
+ * survives (imported_id, then imported_payee, then earlier date, then the SECOND id) and deletes
+ * the other, so the dropped id is derived from the returned kept id.
+ *
+ * The guards below cover what upstream would refuse with a less useful message, or (a split child)
+ * only incidentally. Transfers to different accounts are left to upstream, whose message passes
+ * through unchanged. Everything runs in one queueWriteOperation, so a read-then-write guard stays
+ * in the adapter (never in the tool).
+ */
+export async function mergeTransactions(ids: [string, string]): Promise<{ keptId: string; deletedId: string }> {
+  observability.incrementToolCall('actual.transactions.merge').catch(() => {});
+  return queueWriteOperation(async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { q } = (await import('@actual-app/api')) as any;
+    type Row = { id: string; account?: string; amount?: number; parent_id?: string | null; is_child?: boolean };
+    const rows = await withConcurrency(() =>
+      retry(async () => {
+        // `splits: 'all'` is REQUIRED (#305): the default query excludes split PARENT rows.
+        const res = (await rawRunQuery(
+          q('transactions').options({ splits: 'all' }).filter({ id: { $oneof: ids } }).select(['id', 'account', 'amount', 'parent_id', 'is_child'])
+        )) as { data?: Row[] };
+        return Array.isArray(res?.data) ? res.data : [];
+      }, { retries: 2, backoffMs: 200 })
+    );
+    const byId = new Map<string, Row>(rows.map((r) => [r.id, r]));
+    for (const id of ids) {
+      if (!byId.has(id)) throw new NotFoundRefusal('Transaction', id, 'actual_transactions_get');
+    }
+    const [first, second] = [byId.get(ids[0])!, byId.get(ids[1])!];
+    for (const t of [first, second]) {
+      if (t.is_child || (t.parent_id !== null && t.parent_id !== undefined)) {
+        throw new OutOfRangeRefusal(
+          `Cannot merge a split child transaction (${t.id}); merge the parent transactions instead. Use actual_transactions_get to find the parent.`,
+          t.id
+        );
+      }
+    }
+    if (first.account !== second.account) {
+      throw new OutOfRangeRefusal(
+        `Cannot merge transactions from different accounts: ${ids[0]} is in account ${first.account}, ${ids[1]} is in account ${second.account}. Nothing was changed.`,
+        String(second.account)
+      );
+    }
+    if (first.amount !== second.amount) {
+      throw new OutOfRangeRefusal(
+        `Cannot merge transactions with different amounts: ${ids[0]} is ${first.amount} cents, ${ids[1]} is ${second.amount} cents. Nothing was changed.`,
+        String(second.amount)
+      );
+    }
+    // Non-idempotent: do not retry (#165, #514). After a lost response the dropped id is gone, so
+    // a retry would be refused or act on the wrong pair.
+    const keptId = (await withConcurrency(() => retry(() => rawMergeTransactions(ids) as Promise<string>, { retries: 0, backoffMs: 200 }))) as string;
+    return { keptId, deletedId: keptId === ids[0] ? ids[1] : ids[0] };
+  });
+}
 export async function updateCategory(id: string, fields: Partial<components['schemas']['Category']> | unknown): Promise<void> {
   observability.incrementToolCall('actual.categories.update').catch(() => {});
   return queueWriteOperation(async () => {
@@ -4847,6 +4906,7 @@ export default {
   deleteAccount,
   updateTransaction,
   deleteTransaction,
+  mergeTransactions,
   updateCategory,
   deleteCategory,
   updatePayee,
