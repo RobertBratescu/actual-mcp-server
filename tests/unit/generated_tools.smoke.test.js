@@ -656,6 +656,37 @@ console.log('Running generated tools smoke tests');
   }
   // ── End regression #79 ───────────────────────────────────────────────────
 
+  // ── #478: a patterned recur config, and one without endMode, reach the adapter intact ──
+  // The recur object used to be a stripping z.object: patterns vanished on the way to
+  // createSchedule while the tool reported success.
+  {
+    console.log('\n[#478] schedules_create forwards patterns and does not inject endMode');
+    const seen = [];
+    adapterMod.default.createSchedule = async (schedule) => { seen.push(schedule); return stubResponses.createSchedule; };
+    try {
+      const mod  = toolsIndex['schedules_create'];
+      const tool = mod?.default ?? mod;
+      const patterned = { frequency: 'monthly', start: '2026-06-01', endMode: 'never', patterns: [{ type: 'day', value: -1 }] };
+      const r1 = await tool.call({ name: 'Rent', date: patterned });
+      const r2 = await tool.call({ name: 'Gym', date: { frequency: 'monthly', start: '2026-06-01' } });
+      if (r1?.id !== stubResponses.createSchedule || r2?.id !== stubResponses.createSchedule) {
+        console.error('[#478] expected { id } from both creates'); failures++;
+      } else if (JSON.stringify(seen[0]?.date?.patterns) !== JSON.stringify(patterned.patterns)) {
+        console.error(`[#478] patterns did not reach the adapter: ${JSON.stringify(seen[0]?.date)}`); failures++;
+      } else if (seen[1]?.date && 'endMode' in seen[1].date) {
+        console.error(`[#478] an endMode was injected: ${JSON.stringify(seen[1].date)}`); failures++;
+      } else {
+        console.log('OK [#478] patterns forwarded unchanged; a config without endMode forwarded without one');
+      }
+    } catch (e) {
+      console.error('[#478] unexpected error:', e && e.message);
+      failures++;
+    } finally {
+      adapterMod.default.createSchedule = async (..._args) => stubResponses.createSchedule;
+    }
+  }
+  // ── End #478 ─────────────────────────────────────────────────────────────
+
   // restore adapter
   Object.assign(adapterMod.default, originalAdapter);
 

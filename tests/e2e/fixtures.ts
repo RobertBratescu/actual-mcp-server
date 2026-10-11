@@ -167,7 +167,8 @@ export type Fixtures = {
   }) => Promise<RuleRef>;
   makeSchedule: (opts?: {
     name?: string;
-    date?: string;
+    /** A YYYY-MM-DD one-off date, or a recurrence config (#478: monthly patterns). */
+    date?: string | Record<string, unknown>;
     /** A number for 'is' and 'isapprox', or a { num1, num2 } range for 'isbetween' (#527). */
     amount?: number | { num1: number; num2: number };
     amountOp?: 'is' | 'isapprox' | 'isbetween';

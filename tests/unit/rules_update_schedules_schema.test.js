@@ -167,6 +167,66 @@ console.log('\n[#527] tools/list publishes the union for both tools');
   }
 }
 
+// #478: monthly patterns, a strict recur config (an unknown key used to be STRIPPED, which is
+// how `patterns` vanished while the create reported success) and an optional endMode.
+console.log('\n[#478] recur config: patterns, strictness, optional endMode, on both tools');
+{
+  const SID = '44444444-4444-4444-4444-444444444444';
+  const monthly = (patterns) => ({ frequency: 'monthly', start: '2026-11-03', patterns });
+  for (const [name, tool, wrap] of [
+    ['schedules_create', schedulesCreate, (date) => ({ name: 'MCP-Schedule', account: ACC, date })],
+    ['schedules_update', schedulesUpdate, (date) => ({ id: SID, date })],
+  ]) {
+    for (const [pats, label] of [
+      [[{ type: 'day', value: -1 }], 'the last day'],
+      [[{ type: 'MO', value: 2 }], 'the second Monday'],
+      [[{ type: 'FR', value: -1 }], 'the last Friday'],
+      [[{ type: 'day', value: 1 }, { type: 'day', value: 15 }], 'days 1 and 15'],
+      [[{ type: 'day', value: 31 }], 'day 31'],
+    ]) {
+      const r = where(tool, wrap(monthly(pats)));
+      check(r.ok && JSON.stringify(r.data.date.patterns) === JSON.stringify(pats), `${name}: ${label} parses and keeps its patterns`, r.issues.join(', '));
+    }
+    check(where(tool, wrap({ frequency: 'weekly', start: '2026-11-03', patterns: [] })).ok, `${name}: patterns: [] on weekly is accepted (upstream reads every schedule back with it)`);
+    const noEnd = where(tool, wrap({ frequency: 'monthly', start: '2026-11-03' }));
+    check(noEnd.ok && !('endMode' in noEnd.data.date), `${name}: a config without endMode parses and gets no injected default`);
+    for (const [date, issue, label] of [
+      [{ frequency: 'weekly', start: '2026-11-03', patterns: [{ type: 'day', value: 1 }] }, 'custom at date.patterns', 'non-empty patterns on weekly'],
+      [monthly([{ type: 'day', value: 0 }]), 'custom at date.patterns.0', 'day 0'],
+      [monthly([{ type: 'day', value: 32 }]), 'custom at date.patterns.0', 'day 32'],
+      [monthly([{ type: 'MO', value: 6 }]), 'custom at date.patterns.0', 'MO 6'],
+      [monthly([{ type: 'TU', value: 0 }]), 'custom at date.patterns.0', 'a weekday value 0'],
+      [monthly([{ type: 'day', value: 1 }, { type: 'day', value: 15 }, { type: 'MO', value: 6 }]), 'custom at date.patterns.2', 'a bad third pattern (the issue path names its index)'],
+      [{ frequency: 'monthly', start: '2026-11-03', byMonthDay: 5 }, 'unrecognized_keys at date', 'an unknown key'],
+      [monthly([{ type: 'day', value: 1, extra: 1 }]), 'unrecognized_keys at date.patterns.0', 'an unknown key in a pattern'],
+    ]) {
+      check(rejectedWith(tool, wrap(date), issue), `${name}: ${label} is ${issue}`, where(tool, wrap(date)).issues.join(', '));
+    }
+  }
+  // The messages name the fix, and reach the caller through the central formatter.
+  const fmt = (date) => {
+    const r = schedulesCreate.inputSchema.safeParse({ name: 'x', account: ACC, date });
+    return r.success ? '' : formatZodError(r.error, schedulesCreate.inputSchema);
+  };
+  check(fmt({ frequency: 'weekly', start: '2026-11-03', patterns: [{ type: 'day', value: 1 }] }).includes("only to frequency 'monthly'"), 'the weekly refusal names monthly');
+  check(fmt(monthly([{ type: 'day', value: 0 }])).includes('1 to 31, or -1'), 'the day refusal names the range');
+  check(fmt(monthly([{ type: 'FR', value: 6 }])).includes('1 to 5 (nth), or -1'), 'the weekday refusal names the range');
+  check(fmt(monthly([{ type: 'day', value: 1 }, { type: 'MO', value: 6 }])).includes('MO 6'), 'the range refusal names the offending pattern');
+  check(fmt({ frequency: 'monthly', start: '2026-11-03', byMonthDay: 5 }).includes('byMonthDay'), 'the unknown-key refusal names the key');
+}
+
+console.log('\n[#478] tools/list publishes patterns, an optional endMode and a closed recur object');
+{
+  const { z } = await import('zod');
+  for (const [name, tool] of [['schedules_create', schedulesCreate], ['schedules_update', schedulesUpdate]]) {
+    const date = z.toJSONSchema(tool.inputSchema).properties.date;
+    const recur = (date?.anyOf ?? []).find((b) => b.type === 'object');
+    check(recur?.properties?.patterns?.type === 'array' && String(recur.properties.patterns.description ?? '').includes('Monthly only'), `${name}: patterns is published with its description`, JSON.stringify(recur?.properties?.patterns));
+    check(recur && !(recur.required ?? []).includes('endMode'), `${name}: endMode is not required`);
+    check(recur?.additionalProperties === false, `${name}: the recur object is closed`);
+  }
+}
+
 if (failures > 0) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
 console.log('\nAll rules_update / schedules schema checks passed');
 process.exit(0);

@@ -8,8 +8,10 @@ import { fail } from '../assert.js';
  *   positive: list • create one-off • create recurring • update name
  *             update with resetNextDate • delete created schedule
  *             isbetween range round-trip (#527)
+ *             monthly last-day pattern: next_date is the month end (#478)
  *   negative: delete non-existent UUID (expect error, not crash)
  *             scalar amount with isbetween refused (#527)
+ *             patterns on a weekly schedule refused (#478)
  *
  * Naming pattern: MCP-Schedule-{timestamp}: matched by cleanup.js
  *
@@ -259,6 +261,61 @@ export async function scheduleTests(client, context) {
         fail(`Threw, but the message does not name the range form: ${msg.slice(0, 120)}`);
       }
     }
+  }
+
+  // ── 9c. #478: a monthly last-day pattern lands on the month end; weekly refuses patterns ─
+  console.log('\nCreating a last-day-of-month schedule (#478)...');
+  {
+    // Upstream computes next_date from max(today, start): use the 3rd of next month.
+    const now = new Date();
+    const y = now.getMonth() === 11 ? now.getFullYear() + 1 : now.getFullYear();
+    const m = (now.getMonth() + 1) % 12;
+    const ymd = (day) => `${y}-${String(m + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    const lastDay = new Date(y, m + 1, 0).getDate();
+    let patternId;
+    try {
+      const created = await callTool('actual_schedules_create', {
+        name: `MCP-Schedule-LastDay-${timestamp}`,
+        date: { frequency: 'monthly', start: ymd(3), endMode: 'never', patterns: [{ type: 'day', value: -1 }] },
+        amount: -5000,
+        posts_transaction: false,
+      });
+      patternId = created?.id ?? created?.result?.id ?? created;
+      const after = await callTool('actual_schedules_get', {});
+      const all = after?.schedules ?? after?.result?.schedules ?? after ?? [];
+      const row = Array.isArray(all) ? all.find(s => s.id === patternId) : null;
+      if (row?.next_date === ymd(lastDay) && row?.date?.patterns?.[0]?.value === -1) {
+        console.log(`  ✓ last-day schedule: next_date ${row.next_date}, patterns kept`);
+      } else {
+        fail(`last-day read-back: expected next_date ${ymd(lastDay)}, got ${JSON.stringify(row).slice(0, 200)}`);
+      }
+    } catch (err) {
+      fail(`create last-day schedule failed: ${err.message}`);
+    } finally {
+      if (typeof patternId === 'string') {
+        try { await callTool('actual_schedules_delete', { id: patternId }); } catch (err) { fail(`delete last-day schedule failed: ${err.message}`); }
+      }
+    }
+
+    console.log('NEGATIVE: patterns on a weekly schedule (#478)...');
+    let refused = false;
+    try {
+      await callTool('actual_schedules_create', {
+        name: `MCP-Schedule-WeeklyPatterns-${timestamp}`,
+        date: { frequency: 'weekly', start: ymd(3), patterns: [{ type: 'day', value: 1 }] },
+        amount: -5000,
+        posts_transaction: false,
+      });
+    } catch (err) {
+      const msg = err.message || String(err);
+      if (msg.includes("only to frequency 'monthly'")) {
+        refused = true;
+        console.log(`  ✓ weekly patterns refused: ${msg.slice(0, 120)}`);
+      } else {
+        fail(`Threw, but the message does not name monthly: ${msg.slice(0, 120)}`);
+      }
+    }
+    if (!refused) fail('Expected weekly patterns to be refused, but the create succeeded');
   }
 
   // 10. FIXED(BUG-11): Deleting a non-existent schedule UUID now THROWS an actionable error.

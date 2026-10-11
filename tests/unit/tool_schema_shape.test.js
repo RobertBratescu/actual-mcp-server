@@ -256,6 +256,12 @@ function findShapeless(toolName, published) {
       'the RecurConfig branch is typed (frequency/endMode present), not an open {}', JSON.stringify(recur));
     ok(recur && recur.additionalProperties !== true && !(recur.additionalProperties && Object.keys(recur.additionalProperties).length === 0 && !recur.properties),
       'the RecurConfig branch is not a shapeless open object');
+    // #478: patterns published, endMode optional, and the object closed (it used to strip
+    // unknown keys, which silently dropped patterns).
+    ok(recur && recur.properties && recur.properties.patterns && recur.properties.patterns.type === 'array',
+      'the RecurConfig branch publishes patterns (#478)', JSON.stringify(recur && recur.properties));
+    ok(recur && !(recur.required || []).includes('endMode'), 'endMode is not required (#478)', JSON.stringify(recur && recur.required));
+    ok(recur && recur.additionalProperties === false, 'the RecurConfig branch is closed: additionalProperties false (#478)');
   }
 
   console.log('');

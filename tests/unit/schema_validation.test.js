@@ -268,7 +268,7 @@ async function expectCallError(tool, input, label) {
     'valid update with a typed RecurConfig')) fail();
   if (!expectParseError(schedules_update_tool,
     { id: '00000000-0000-0000-0000-000000000001', date: { frequency: 'monthly' } },
-    'malformed RecurConfig (missing start/endMode) is rejected, not forwarded unshaped')) fail();
+    'malformed RecurConfig (missing start) is rejected, not forwarded unshaped (endMode is optional since #478)')) fail();
   if (!expectParseError(schedules_update_tool,
     { id: '00000000-0000-0000-0000-000000000001', date: { frequency: 'fortnightly', start: '2026-01-01', endMode: 'never' } },
     'invalid RecurConfig frequency is rejected')) fail();

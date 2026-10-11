@@ -29,7 +29,7 @@ const InputSchema = z.object({
   completed: z.boolean().optional()
     .describe('true marks it completed, false reactivates it'),
   resetNextDate: z.boolean().optional().default(false)
-    .describe('Recalculate next_date; set it when changing the date'),
+    .describe('Recalculate next_date'),
 }).superRefine((input, ctx) => {
   // #527: with both fields supplied the input alone decides. With only one, the answer
   // depends on the stored schedule, so adapter.updateSchedule checks it inside the write queue.
@@ -40,7 +40,7 @@ const InputSchema = z.object({
 
 const tool: ToolDefinition = {
   name: 'actual_schedules_update',
-  description: `Update a schedule; supply only the fields to change. Set resetNextDate: true when changing the date or recurrence.`,
+  description: `Update a schedule; supply only the fields to change. A new date replaces the stored recurrence, patterns included. Set resetNextDate: true when changing the date or recurrence.`,
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     const input = InputSchema.parse(args || {});

@@ -34,7 +34,7 @@ const InputSchema = z.object({
 
 const tool: ToolDefinition = {
   name: 'actual_schedules_create',
-  description: `Create a schedule, one-off (YYYY-MM-DD date) or recurring (RecurConfig object with frequency, start, endMode). Amounts are in cents, negative for expenses.`,
+  description: `Create a schedule, one-off (YYYY-MM-DD date) or recurring (RecurConfig object: frequency and start, optional endMode, monthly patterns such as the last day or the second Monday). Amounts are in cents, negative for expenses.`,
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     const input = InputSchema.parse(args || {});

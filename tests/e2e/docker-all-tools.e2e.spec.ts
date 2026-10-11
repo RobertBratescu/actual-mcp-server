@@ -1671,6 +1671,87 @@ test.describe('Docker E2E - ALL 83 TOOLS', () => {
     expect(row?.amount).toBe(-5000);
   });
 
+  // #478: monthly patterns. Upstream computes next_date from max(today, start), so every date
+  // here is relative to the month after the current one rather than a literal that goes stale.
+  const nextMonth = (() => {
+    const now = new Date();
+    const y = now.getMonth() === 11 ? now.getFullYear() + 1 : now.getFullYear();
+    const m = (now.getMonth() + 1) % 12; // 0-based
+    const ymd = (day: number) => `${y}-${String(m + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    return { ymd, lastDay: new Date(y, m + 1, 0).getDate(), weekday: (day: number) => new Date(y, m, day).getDay() };
+  })();
+
+  test('actual_schedules_create - should store a last-day pattern, and a name update keeps it (#478)', async ({ mcp, makeSchedule }) => {
+    const patterns = [{ type: 'day', value: -1 }];
+    const schedule = await makeSchedule({ date: { frequency: 'monthly', start: nextMonth.ymd(3), endMode: 'never', patterns } });
+
+    let row = await readSchedule(mcp, schedule.id);
+    expect(row?.date?.patterns).toEqual(patterns);
+    expect(row?.next_date).toBe(nextMonth.ymd(nextMonth.lastDay));
+
+    const data = await mcp.call('actual_schedules_update', { id: schedule.id, name: `${schedule.name}-renamed` });
+    expect(data?.success ?? data?.result?.success).toBe(true);
+    row = await readSchedule(mcp, schedule.id);
+    expect(row?.name).toBe(`${schedule.name}-renamed`);
+    expect(row?.date?.patterns).toEqual(patterns);
+  });
+
+  test('actual_schedules_create - should store a second-Monday pattern (#478)', async ({ mcp, makeSchedule }) => {
+    const patterns = [{ type: 'MO', value: 2 }];
+    const schedule = await makeSchedule({ date: { frequency: 'monthly', start: nextMonth.ymd(1), endMode: 'never', patterns } });
+
+    const row = await readSchedule(mcp, schedule.id);
+    expect(row?.date?.patterns).toEqual(patterns);
+    const day = Number(String(row?.next_date).slice(8, 10));
+    expect(String(row?.next_date).slice(0, 8)).toBe(nextMonth.ymd(1).slice(0, 8));
+    expect(day).toBeGreaterThanOrEqual(8);
+    expect(day).toBeLessThanOrEqual(14);
+    expect(nextMonth.weekday(day)).toBe(1);
+  });
+
+  test('actual_schedules_create - should store days 1 and 15 without endMode (#478)', async ({ mcp, makeSchedule }) => {
+    const patterns = [{ type: 'day', value: 1 }, { type: 'day', value: 15 }];
+    const schedule = await makeSchedule({ date: { frequency: 'monthly', start: nextMonth.ymd(3), patterns } });
+
+    const row = await readSchedule(mcp, schedule.id);
+    expect(row?.date?.patterns).toEqual(patterns);
+    expect(row?.next_date).toBe(nextMonth.ymd(15));
+  });
+
+  test('actual_schedules_create - should refuse patterns on a weekly schedule and create nothing (#478)', async ({ mcp }) => {
+    const name = `E2E-Schedule-WeeklyPatterns-${uniqueSuffix()}`;
+    await expect(
+      mcp.call('actual_schedules_create', {
+        name,
+        date: { frequency: 'weekly', start: nextMonth.ymd(3), patterns: [{ type: 'day', value: 1 }] },
+        amount: -5000,
+        posts_transaction: false,
+      }),
+    ).rejects.toThrow(/only to frequency 'monthly'/);
+
+    const listData = await mcp.call('actual_schedules_get');
+    const schedules: any[] =
+      listData?.schedules ?? listData?.result?.schedules ?? (Array.isArray(listData) ? listData : []);
+    expect(schedules.find((s: any) => s.name === name)).toBeUndefined();
+  });
+
+  test('actual_schedules_update - should refuse patterns on a weekly date and keep the stored one (#478)', async ({ mcp, makeSchedule }) => {
+    const patterns = [{ type: 'day', value: -1 }];
+    const schedule = await makeSchedule({ date: { frequency: 'monthly', start: nextMonth.ymd(3), endMode: 'never', patterns } });
+
+    await expect(
+      mcp.call('actual_schedules_update', {
+        id: schedule.id,
+        date: { frequency: 'weekly', start: nextMonth.ymd(3), patterns: [{ type: 'day', value: 1 }] },
+        resetNextDate: true,
+      }),
+    ).rejects.toThrow(/only to frequency 'monthly'/);
+
+    const row = await readSchedule(mcp, schedule.id);
+    expect(row?.date?.frequency).toBe('monthly');
+    expect(row?.date?.patterns).toEqual(patterns);
+  });
+
   test('actual_schedules_delete - should delete schedule and verify gone', async ({ mcp, makeSchedule }) => {
     const schedule = await makeSchedule();
 
