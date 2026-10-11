@@ -1,5 +1,12 @@
 {
   "_comment": "Accepted uncovered @actual-app/api methods (#321). apiVersion is per entry and records when the gap was first accepted. There is deliberately NO global apiVersion field: a single one would lose provenance at the next upgrade. No value here is ever asserted against the live version, so a version bump alone can never turn the drift job red. This file suppresses REDNESS only; re-filing is suppressed by the tracker sentinel, because a committed file cannot be written by CI. Maintained by deliberate human commit: the drift job never writes it, since an auto-written entry would carry an empty reason and no owning issue, letting the machine grant its own acceptance.",
   "maxAccepted": 10,
-  "accepted": {}
+  "accepted": {
+    "setPreference": {
+      "reason": "Writes budget-wide SyncedPrefs: display settings, import and bank-sync mappings, feature flags and budgetType (the envelope or tracking mode switch). None is financial data, no user has asked for it, and budgetType and the import mappings should not be changed by an assistant from a chat turn; reading is covered by actual_preferences_get (#333).",
+      "issue": 515,
+      "apiVersion": "26.10.0",
+      "firstSeen": "2026-10-08"
+    }
+  }
 }
