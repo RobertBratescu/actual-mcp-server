@@ -295,6 +295,8 @@ Principal key formats:
 - `"some-sub-uuid"`: matches the `sub` claim
 - `"group:admin"`: matches an element in `groups` or `roles` array
 
+The value is validated at startup (#551): it must be a JSON object whose values are arrays of non-empty strings (`["*"]` for all budgets). Anything else, invalid JSON included, refuses to start with `AUTH_BUDGET_ACL` named in the error, so a typo cannot silently open every budget. Unset or `{}` means every authenticated user may use the configured budget.
+
 **Casdoor note**: Casdoor copies the scopes of the authorization request into the access token's `scope` claim, so `OIDC_SCOPES` works for scopes your clients request; if the Casdoor application defines a Scopes list, each requested scope must be on it. When clients request no scope the claim is absent: set `OIDC_SCOPES=` (empty string) to disable scope enforcement, and use `OIDC_SCOPES_SUPPORTED` if clients need scopes advertised in discovery. Since v2.318.0 Casdoor honors the RFC 8707 `resource` parameter and puts it in `aud`, so `OIDC_ACCEPTED_AUDIENCES` is only needed for older versions or clients that send no `resource`.
 
 #### Cloudflare Access for SaaS + Google Gemini

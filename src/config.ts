@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { parseIdentityMap } from './auth/identity-map.js';
+import { parseBudgetAcl } from './auth/budget-acl-parse.js';
 
 // #466: the byte count body-parser will ACTUALLY enforce for MCP_HTTP_BODY_LIMIT, or
 // null when the value must be refused. Mirrors `bytes.parse` (what body-parser uses)
@@ -192,7 +193,33 @@ export const configSchema = z.object({
   // Keys: email, sub, or "group:<name>". Values: array of sync IDs or ["*"] for all.
   // Example: {"alice@example.com":["budget-1"],"group:admin":["*"]}
   // Leave unset to allow all authenticated users to access all budgets.
-  AUTH_BUDGET_ACL: z.string().optional(),
+  // #551: a SET value must parse, whatever AUTH_PROVIDER and AUTH_BUDGET_ACL_SOURCE
+  // are. Unset and '' mean "no restrictions" and are not validated. Before this
+  // refine an invalid value was parsed lazily at runtime and degraded to an empty
+  // map, which the ACL read as "open": a typo granted every budget to every user.
+  // The parser is a zero-import leaf so this file can call it (see its header).
+  AUTH_BUDGET_ACL: z
+    .string()
+    .optional()
+    .superRefine((v: string | undefined, ctx: z.RefinementCtx) => {
+      if (v === undefined || v === '') return;
+      try {
+        parseBudgetAcl(v);
+      } catch (err) {
+        // The parser's message is safe by contract (variable name, problem class,
+        // entry index and JSON type only; never a key, a value or JSON.parse's
+        // echo of the input). Its own "AUTH_BUDGET_ACL: " prefix is dropped here
+        // because the sentence already names the variable.
+        const reason = (err instanceof Error ? err.message : String(err)).replace(/^AUTH_BUDGET_ACL: /, '');
+        ctx.addIssue({
+          code: 'custom',
+          message:
+            `AUTH_BUDGET_ACL is malformed (${reason}). ` +
+            'Expected a JSON object mapping each principal to an array of budget sync ids, for example ' +
+            '{"<email or sub>":["<sync id>"],"group:<name>":["*"]}. See docs/CONFIGURATION.md.',
+        });
+      }
+    }),
   // #338: where the budget ACL comes from.
   //   'static' (default) = AUTH_BUDGET_ACL above, exactly as before.
   //   'actual'           = derived from the Actual server's own per-file access

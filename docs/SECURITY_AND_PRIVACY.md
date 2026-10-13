@@ -162,6 +162,10 @@ AUTH_BUDGET_ACL={"alice@example.com":["aaa-bbb-ccc"],"group:admin":["*"]}
 Principals are matched against the JWT `sub` claim, the `email` claim, and each entry of the `groups` (or `roles`) claim, where group entries match as `group:<name>`.
 If `AUTH_BUDGET_ACL` is not set, all authenticated users access the single configured budget.
 
+**An invalid `AUTH_BUDGET_ACL` refuses startup** (#551). A set value must be a JSON object whose every value is an array of non-empty strings; invalid JSON (a trailing comma, for example), an array, a scalar, `null`, or an entry that is not such an array makes the server exit at startup with a message naming the variable and the problem class, on HTTP and on stdio alike. The check runs whatever `AUTH_PROVIDER` and `AUTH_BUDGET_ACL_SOURCE` are set to. Unset, an empty string, and `{}` keep the documented open behaviour. The error text never includes a principal or a sync id. Should the runtime parser ever see an invalid value anyway (it cannot from the environment once startup validation has passed), every principal is denied with a 403 and an `[ACL] Invalid AUTH_BUDGET_ACL: access denied` error line, never granted every budget.
+
+Upgrade note: before #551 an invalid value was logged once and then treated as "no ACL", so every authenticated user could reach every budget. A deployment whose value was silently invalid will refuse its first restart after upgrading, including one with `AUTH_PROVIDER=none` or `AUTH_BUDGET_ACL_SOURCE=actual`, where the variable was previously ignored. The fix is to correct the JSON or unset the variable.
+
 **Security Properties**:
 - ✅ JWKS-validated JWT (cryptographically verified)
 - ✅ Per-user budget isolation via `AUTH_BUDGET_ACL`

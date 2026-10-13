@@ -9,13 +9,21 @@
 //   { "<principal>": ["<syncId1>", "<syncId2>"] }
 //
 //   Principal keys:
-//     "alice@example.com"  — matched against token email claim
-//     "some-sub-uuid"      — matched against token sub claim
-//     "group:admin"        — matched against token groups/roles array
+//     "alice@example.com"  matched against the token email claim
+//     "some-sub-uuid"      matched against the token sub claim
+//     "group:admin"        matched against the token groups/roles array
 //
 //   Value ["*"] grants access to all budgets (admin shorthand).
 //
-// When AUTH_BUDGET_ACL is unset, all authenticated users are allowed ("*").
+// Three states, classified once from the raw value and cached (#551):
+//   open  (AUTH_BUDGET_ACL unset, '' or '{}'): every authenticated user is
+//         allowed ("*"), as documented.
+//   map   (a valid non-empty object): the per-principal lookup below.
+//   deny  (a value that does not parse): every principal gets [] and a 403.
+//         config.ts refuses startup on such a value, so this state is a
+//         defence in depth for any caller that reaches the parser another way.
+//         Before #551 a parse failure degraded to an EMPTY map, which read as
+//         "open": a typo in the ACL granted every budget to every user.
 //
 // Usage in httpServer.ts:
 //   app.use(httpPath, budgetAclMiddleware);   // after bearerAuth()
@@ -26,35 +34,46 @@
 import type { Request, Response, NextFunction } from 'express';
 import config from '../config.js';
 import logger from '../logger.js';
+import { parseBudgetAcl, type BudgetAclMap } from './budget-acl-parse.js';
 import { resolveAllowedBudgetsFromActual, resolvePrincipalAsync } from './budget-acl-dynamic.js';
 
 // ---------------------------------------------------------------------------
-// ACL map (parsed once from env, cached)
+// ACL state (classified once from env, cached)
 // ---------------------------------------------------------------------------
 
-let _aclMap: Record<string, string[]> | null = null;
+// One explicit state rather than an empty map plus a separate marker: a writer
+// that forgot the marker would silently restore the fail-open path.
+type AclState = { kind: 'open' } | { kind: 'map'; map: BudgetAclMap } | { kind: 'deny' };
 
-function getAclMap(): Record<string, string[]> {
-  if (_aclMap !== null) return _aclMap;
+let _aclState: AclState | null = null;
+// Test seam (#551): when set, classify this raw value instead of config.AUTH_BUDGET_ACL.
+let _rawOverride: { raw: string | undefined } | null = null;
 
-  if (!config.AUTH_BUDGET_ACL) {
-    _aclMap = {};
-    return _aclMap;
-  }
+function classify(raw: string | undefined): AclState {
+  if (raw === undefined || raw === '') return { kind: 'open' };
 
+  let map: BudgetAclMap;
   try {
-    const parsed = JSON.parse(config.AUTH_BUDGET_ACL);
-    if (typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new TypeError('AUTH_BUDGET_ACL must be a JSON object');
-    }
-    _aclMap = parsed as Record<string, string[]>;
-    logger.info(`[ACL] Budget ACL loaded: ${Object.keys(_aclMap).length} principal(s)`);
+    map = parseBudgetAcl(raw);
   } catch (err) {
-    logger.error('[ACL] Invalid AUTH_BUDGET_ACL JSON — treating as empty (no budget restrictions):', err);
-    _aclMap = {};
+    // Only the parser's message, which is safe by contract (it never names a key
+    // or a value); never the raw error object, whose cause or stack could.
+    const reason = err instanceof Error ? err.message : 'AUTH_BUDGET_ACL: unparseable';
+    logger.error(`[ACL] Invalid AUTH_BUDGET_ACL: access denied to every principal until it is fixed (${reason})`);
+    return { kind: 'deny' };
   }
 
-  return _aclMap;
+  const count = Object.keys(map).length;
+  if (count === 0) return { kind: 'open' };
+  logger.info(`[ACL] Budget ACL loaded: ${count} principal(s)`);
+  return { kind: 'map', map };
+}
+
+function getAclState(): AclState {
+  if (_aclState === null) {
+    _aclState = classify(_rawOverride !== null ? _rawOverride.raw : config.AUTH_BUDGET_ACL);
+  }
+  return _aclState;
 }
 
 // ---------------------------------------------------------------------------
@@ -65,15 +84,21 @@ function getAclMap(): Record<string, string[]> {
  * Returns the list of allowed budget sync-IDs for the currently authenticated
  * request principal.
  *
- * - Returns `['*']` when ACL is empty / unset (no restrictions).
+ * - Returns `['*']` in the open state (ACL unset, empty, or `{}`).
  * - Returns `['*']` when any matched principal has wildcard access.
  * - Returns `[]` when the user is authenticated but not in the ACL at all.
+ * - Returns `[]` for every principal in the deny state (the ACL value does not
+ *   parse), never `['*']`.
+ *
+ * Lookups use Object.hasOwn so a principal named like an Object.prototype member
+ * (`constructor`, `toString`) is simply absent instead of matching the inherited
+ * function (which used to throw and surface as a 500).
  */
 export function getAllowedBudgets(req: Request): string[] {
-  const acl = getAclMap();
-
-  // No ACL configured → allow everything
-  if (Object.keys(acl).length === 0) return ['*'];
+  const state = getAclState();
+  if (state.kind === 'open') return ['*'];
+  if (state.kind === 'deny') return [];
+  const acl = state.map;
 
   const auth = (req as Request & { auth?: Record<string, unknown> }).auth;
   if (!auth) return [];
@@ -92,13 +117,14 @@ export function getAllowedBudgets(req: Request): string[] {
 
   // Check for wildcard admin access first
   for (const p of principals) {
-    if (acl[p]?.includes('*')) return ['*'];
+    if (Object.hasOwn(acl, p) && acl[p].includes('*')) return ['*'];
   }
 
   // Collect all permitted sync-IDs
   const permitted = new Set<string>();
   for (const p of principals) {
-    for (const id of acl[p] ?? []) permitted.add(id);
+    if (!Object.hasOwn(acl, p)) continue;
+    for (const id of acl[p]) permitted.add(id);
   }
 
   return [...permitted];
@@ -119,8 +145,8 @@ export function canAccessBudget(req: Request, budgetSyncId: string): boolean {
 /**
  * Express middleware that enforces the budget ACL when OIDC auth is active.
  *
- * - Falls through immediately when AUTH_PROVIDER !== 'oidc' or AUTH_BUDGET_ACL
- *   is unset (no-op — keeps backward compatibility).
+ * - Falls through immediately when AUTH_PROVIDER !== 'oidc' (no-op, keeps
+ *   backward compatibility). With OIDC and the ACL unset it attaches `['*']`.
  * - Attaches `req.allowedBudgets` for downstream use (multi-budget tools).
  * - Returns HTTP 403 if the authenticated user has no permitted budgets.
  *
@@ -197,12 +223,25 @@ async function resolveDynamicAcl(req: Request, res: Response, next: NextFunction
   }
 }
 
-/** Reset cached state (test helper). */
+/** Reset cached state and the raw override (test helper). */
 export function _resetAclForTests(): void {
-  _aclMap = null;
+  _aclState = null;
+  _rawOverride = null;
 }
 
-/** Directly set the ACL map (test helper — bypasses config/env). */
+/**
+ * Directly set the ACL map (test helper; bypasses config/env). `{}` is the open
+ * state, exactly as an unset variable is.
+ */
 export function _setAclForTests(aclMap: Record<string, string[]>): void {
-  _aclMap = aclMap;
+  _aclState = Object.keys(aclMap).length === 0 ? { kind: 'open' } : { kind: 'map', map: aclMap };
+}
+
+/**
+ * #551 test seam: classify `raw` as if it were the AUTH_BUDGET_ACL value, through
+ * the same parser and logging as the real path. Cleared by _resetAclForTests.
+ */
+export function _setRawAclForTests(raw: string | undefined): void {
+  _rawOverride = { raw };
+  _aclState = null;
 }
