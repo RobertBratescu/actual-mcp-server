@@ -153,6 +153,32 @@ for another resource.
 **Casdoor & Cloudflare Access compatibility**: Cloudflare Access for SaaS auth-code flow JWTs omit the `scope` claim; Casdoor JWTs carry the scopes the client requested and omit the claim only when the client requests none.
 When the tokens carry no `scope` claim (Cloudflare Access for SaaS, or Casdoor when the client requests no scope), set `OIDC_SCOPES=` (empty string) so the server enforces no scope requirements and logs `Scopes required: (none)`. With Casdoor, list the scopes your clients request in `OIDC_SCOPES` instead, so they are enforced; this limits what the client requested, not which user it is, so per-user access still comes from the budget ACL (see the Casdoor note in docs/guides/AI_CLIENT_SETUP.md). If a client requires scopes (like `offline_access`) advertised in discovery, set `OIDC_SCOPES_SUPPORTED`. Advertised scopes are not enforced on incoming tokens; access control comes from the signature, issuer, closed audience allowlist, non-empty `sub`, required scopes, and the budget ACL. Advertising `offline_access` exists to make the IdP issue the client a long-lived refresh token; this server cannot revoke it, so a compromised client keeps obtaining access tokens until the refresh token is revoked at the IdP. Advertise it only for clients that need it.
 
+#### Limiting a leaked refresh token (#488)
+
+Scope: this applies to `AUTH_PROVIDER=oidc` over HTTP only. Static bearer auth (`MCP_SSE_AUTHORIZATION`, revoked by rotating the value and restarting) and stdio involve no refresh tokens. If you advertise `offline_access` in `OIDC_SCOPES_SUPPORTED`, the refresh token the client obtains lives at the IdP and outlives anything this server controls. Three facts shape the response:
+
+- This server verifies access tokens locally against the IdP's JWKS (`src/server/httpServer.ts`) and does no token introspection, so an access token that has already been issued stays valid here until its `exp`, even after its refresh token is revoked. A short access-token lifetime matters as much as a short refresh-token lifetime.
+- With the static source (`AUTH_BUDGET_ACL`), the map is parsed once and cached in `src/auth/budget-acl.ts`, so an edit takes effect only after a restart. With `AUTH_BUDGET_ACL_SOURCE=actual`, allowed budgets are cached per principal for 60 seconds, so a change in Actual applies within about a minute.
+- With the static source, a principal is matched by email, by `sub` and by each `group:<name>`, so removing one key does not cut a user who still matches another key. The dynamic source matches one resolved identity against each budget file's access list and consults none of those keys.
+
+What to set up at the IdP, in general terms (no vendor setting is named here; check your IdP's documentation):
+
+- Give the MCP client's application a short refresh-token lifetime and, where supported, an idle timeout, so a leaked token expires on its own.
+- Give it a short access-token lifetime, because of the local-verification point above.
+- Enable refresh-token rotation with reuse detection where the IdP implements it (RFC 9700 section 4.14.2). Rotation alone is not sufficient: reuse detection catches a replayed copy only while the legitimate client is still refreshing. Sender-constrained tokens (DPoP, RFC 9449, or mutual TLS, RFC 8705) are the stronger option where the client supports them. Revocation remains the remedy (RFC 6749 section 10.4).
+- Know where to revoke: the grant or the refresh tokens of that client in the IdP's admin console, or the IdP's RFC 7009 revocation endpoint.
+- Advertise `offline_access` only for the clients that need it.
+
+If a client is compromised, in this order:
+
+1. Cut the principal at this server. With the static source, map it to an empty list (`{"alice@example.com":[]}`), make sure no other key (email, `sub`, `group:<name>`) still matches it, and restart. With the dynamic source, remove it from the budget file's access list in Actual, which applies within 60 seconds.
+2. Revoke the client's grant or refresh tokens at the IdP.
+3. Wait out the last access token's `exp` before calling the incident contained.
+
+Fail-open warning for step 1: with the static source, an unset variable or `{}` means every authenticated user may reach every budget, so the cut-off exists only if an ACL was configured before the incident. Never delete the last key. To cut one principal off, map it to `[]`, never remove the variable. Since #551 an invalid value refuses startup instead of silently opening every budget, so a restart that fails with `AUTH_BUDGET_ACL is malformed` means the edit did not apply: fix the JSON and restart again. A startup that gets past config validation means the JSON parsed. The map itself is loaded lazily, so the line `[ACL] Budget ACL loaded: N principal(s)` (at the `info` level) appears on the first authenticated request after the restart, not at boot.
+
+References: RFC 9700 (OAuth 2.0 Security Best Current Practice) section 4.14 on refresh tokens, RFC 6749 section 10.4, RFC 7009 (token revocation), RFC 9449 (DPoP), RFC 8705 (mutual TLS). RFC 9728 covers only the `scopes_supported` advertisement itself.
+
 **Per-user Budget ACL** (`AUTH_BUDGET_ACL`):
 ```
 # Format: a JSON object mapping each principal to an array of budget sync IDs.
