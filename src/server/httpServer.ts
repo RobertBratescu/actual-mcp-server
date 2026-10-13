@@ -261,8 +261,15 @@ export async function startHttpServer(
   // loser would silently get the generic 404, restoring this bug at random.
   const INIT_FAILURE_TTL_MS = 60_000;
   const INIT_FAILURE_MAX = 1000;
-  const sessionInitFailures = new Map<string, { cause: InitFailureCause; sentence: string; at: number }>();
-  const rememberInitFailure = (sid: string, err: unknown): void => {
+  // #550: the record carries the principal that initiated the session (the same value
+  // recordSessionOwner stores on success) and is served only to that principal. A failed
+  // init records no owner in session-owners.ts, and the POST cause branch runs before the
+  // ownership guard, so without this ANY authenticated principal presenting the id got
+  // the cause reply for 60 s, which contradicts the unknown-id equivalence #529 gives
+  // initialized sessions. Under a static bearer or no auth every caller is the same
+  // principal, so those deployments keep the #438 behaviour unchanged.
+  const sessionInitFailures = new Map<string, { cause: InitFailureCause; sentence: string; at: number; owner: string | undefined }>();
+  const rememberInitFailure = (sid: string, err: unknown, owner: string | undefined): void => {
     const now = Date.now();
     for (const [k, v] of sessionInitFailures) {
       if (now - v.at > INIT_FAILURE_TTL_MS) sessionInitFailures.delete(k);
@@ -274,13 +281,19 @@ export async function startHttpServer(
       if (oldest === undefined) break;
       sessionInitFailures.delete(oldest);
     }
-    sessionInitFailures.set(sid, { ...classifyInitFailure(err), at: now });
+    sessionInitFailures.set(sid, { ...classifyInitFailure(err), at: now, owner });
   };
-  /** Peek. Never deletes. Returns undefined once the TTL has elapsed. */
-  const peekInitFailure = (sid: string): { cause: InitFailureCause; sentence: string } | undefined => {
+  /**
+   * Peek. Never deletes. Returns undefined once the TTL has elapsed, and (#550) for a
+   * principal other than the one that initiated the session: the caller then falls
+   * through to the reply an unknown id gets, and the record is neither consumed nor
+   * extended. Strict equality, like sessionOwnerMatches.
+   */
+  const peekInitFailure = (sid: string, principal: string | undefined): { cause: InitFailureCause; sentence: string } | undefined => {
     const rec = sessionInitFailures.get(sid);
     if (!rec) return undefined;
     if (Date.now() - rec.at > INIT_FAILURE_TTL_MS) return undefined;
+    if (rec.owner !== principal) return undefined;
     return { cause: rec.cause, sentence: rec.sentence };
   };
 
@@ -583,7 +596,7 @@ export async function startHttpServer(
               // cause is known here and discarded, and the client's next request gets
               // a bare "Session not found" that says nothing about a schema mismatch,
               // a bad password or an unreachable server.
-              rememberInitFailure(sid, err);
+              rememberInitFailure(sid, err, sessionOwner);
               rejectInit?.(err);
             } finally {
               // Clean up the promise after a short delay to allow pending requests to complete
@@ -654,7 +667,7 @@ export async function startHttpServer(
           // enum-only contract through the very hole left open there.
           let knownFailure: { cause: InitFailureCause; sentence: string } | undefined;
           try {
-            knownFailure = peekInitFailure(sessionId);
+            knownFailure = peekInitFailure(sessionId, resolvePrincipal(req));
           } catch {
             knownFailure = undefined;
           }
@@ -812,7 +825,8 @@ export async function startHttpServer(
     // session. The `transports.has` guard is load bearing: a session whose init
     // FAILED never had an owner recorded, and under OIDC or a static bearer every
     // caller has a principal, so without it that session would be refused here
-    // instead of reaching the #438 cause report below.
+    // instead of reaching the #438 cause report below. That report is owner-bound
+    // on its own since #550 (the peek takes the principal).
     if (transports.has(sessionId) && !sessionOwnerMatches(sessionId, resolvePrincipal(req))) {
       logger.warn(`[SESSION] Refused a GET for session ${sessionId} from a principal that does not own it`);
       res.status(400).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Transport not ready' }, id: null });
@@ -838,7 +852,7 @@ export async function startHttpServer(
       // NODE_ENV is not production.
       let knownFailure: { cause: InitFailureCause; sentence: string } | undefined;
       try {
-        knownFailure = peekInitFailure(sessionId);
+        knownFailure = peekInitFailure(sessionId, resolvePrincipal(req));
       } catch {
         knownFailure = undefined;
       }

@@ -581,8 +581,11 @@ identity). A POST or GET on the MCP path that carries another principal's sessio
 answered exactly as an unknown session would be. `actual_session_list` lists only the
 caller's own sessions (its totals stay pool-wide), and `actual_session_close` only matches
 and closes the caller's own sessions. The unauthenticated `/health` endpoint reports pool
-counts only and never returns a session id. With authentication disabled every caller is
-the same anonymous principal, so nothing changes there.
+counts only and never returns a session id. The same rule covers a session whose
+initialization failed (#550): the cause of the failure is reported for 60 seconds only to the
+principal that initialized it, and any other principal presenting that id gets the unknown-id
+reply. With authentication disabled every caller is the same anonymous principal, so nothing
+changes there.
 
 #### HTTP auth is required by default (#242)
 

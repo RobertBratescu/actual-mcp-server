@@ -218,7 +218,7 @@ check('#438: both call sites are CONTAINED by their own try/catch', () => {
   const getRoute = /app\.get\(httpPath[\s\S]*?\n  \}\);/.exec(source);
   assert.ok(postRoute && getRoute, 'found both routes');
   for (const [label, route] of [['POST', postRoute[0]], ['GET', getRoute[0]]]) {
-    assert.ok(/try \{[\s\S]*?peekInitFailure\(sessionId\)[\s\S]*?\}\s*catch/.test(route),
+    assert.ok(/try \{[\s\S]*?peekInitFailure\(sessionId, resolvePrincipal\(req\)\)[\s\S]*?\}\s*catch/.test(route),
       `the ${label} lookup is guarded`);
   }
 });
@@ -246,8 +246,10 @@ check('#438: the failure is RECORDED where it is already known and was thrown aw
   // code the first time this guard was written.
   const catchBlock = /Failed to initialize Actual for session[\s\S]*?rejectInit\?\.\(err\);/.exec(source);
   assert.ok(catchBlock, 'found the session-init catch');
-  assert.ok(/rememberInitFailure\(sid, err\)/.test(catchBlock[0]),
-    'the init catch must record the cause; it already had the error and discarded it');
+  // #550: the record also carries the initiating principal, resolved from the
+  // initialize request itself (the same value recordSessionOwner stores on success).
+  assert.ok(/rememberInitFailure\(sid, err, sessionOwner\)/.test(catchBlock[0]),
+    'the init catch must record the cause and the owner; it already had the error and discarded it');
   assert.ok(!/transports\.set\(sid/.test(catchBlock[0]),
     'and must still NOT register the transport: dead-session accumulation stays prevented');
 });
