@@ -788,15 +788,16 @@ export async function startHttpServer(
       res.status(400).json({ jsonrpc: '2.0', error: { code: -32000, message: 'No session id' }, id: null });
       return;
     }
-    // Same ownership rule as the POST route, checked before the idle clock is
-    // touched so another principal cannot keep a session alive either. A refusal
-    // reads like an unknown session.
+    // Same ownership rule as the POST route. A refusal reads like an unknown
+    // session. The `transports.has` guard is load bearing: a session whose init
+    // FAILED never had an owner recorded, and under OIDC or a static bearer every
+    // caller has a principal, so without it that session would be refused here
+    // instead of reaching the #438 cause report below.
     if (transports.has(sessionId) && !sessionOwnerMatches(sessionId, resolvePrincipal(req))) {
       logger.warn(`[SESSION] Refused a GET for session ${sessionId} from a principal that does not own it`);
       res.status(400).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Transport not ready' }, id: null });
       return;
     }
-    connectionPool.touch(sessionId); // Refresh the pool's idle clock (#167)
     const transport = transports.get(sessionId);
     if (!transport) {
       // #438: same cause, this route's own status and code. The classifier owns no
@@ -833,6 +834,12 @@ export async function startHttpServer(
       });
       return;
     }
+    // #529: the idle clock is refreshed only for a session this route will serve,
+    // after the ownership check and the transport lookup, in the same order as
+    // POST. Touching before the lookup let a request that was about to be
+    // answered "Transport not ready" (a pool entry whose transport is gone, or
+    // one still initializing) keep that session alive.
+    connectionPool.touch(sessionId); // Refresh the pool's idle clock (#167)
     await transport.handleRequest(req, res);
   });
 
