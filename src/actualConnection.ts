@@ -20,6 +20,11 @@ let initializationError: Error | null = null;
 // Feature flag to enable connection pooling - can be disabled via environment variable
 let useConnectionPool = process.env.USE_CONNECTION_POOL !== 'false';
 
+/** #530: httpServer registers sessions with the pool only when the pool is in use. */
+export function isConnectionPoolEnabled(): boolean {
+  return useConnectionPool;
+}
+
 export async function connectToActual() {
   if (initialized) return;
   if (initializing) {

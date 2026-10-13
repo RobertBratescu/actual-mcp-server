@@ -12,8 +12,8 @@ import logger, { resolveRequestId } from '../logger.js';
 import { attachTransportErrorLogger } from '../lib/transportErrorLogger.js';
 import { getLocalIp } from '../utils.js';
 import actualToolsManager from '../actualToolsManager.js';
-import { getConnectionState, connectToActualForSession, shutdownActualForSession, shutdownActual, canAcceptNewSession } from '../actualConnection.js';
-import { connectionPool } from '../lib/ActualConnectionPool.js';
+import { getConnectionState, connectToActualForSession, shutdownActualForSession, shutdownActual, canAcceptNewSession, isConnectionPoolEnabled } from '../actualConnection.js';
+import { connectionPool, type EvictionReason } from '../lib/ActualConnectionPool.js';
 import observability from '../observability.js';
 import config from '../config.js';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
@@ -28,6 +28,7 @@ import { parseScopeList } from '../lib/oidc-scopes.js';
 import { budgetAclMiddleware } from '../auth/budget-acl.js';
 import { runAclPreflight } from '../auth/budget-acl-dynamic.js';
 import * as https from 'node:https';
+import { finished } from 'node:stream';
 import * as fs from 'node:fs';
 
 // AsyncLocalStorage for request context: moved to src/lib/requestContext.ts
@@ -304,20 +305,26 @@ export async function startHttpServer(
   // the matching transport in the same window. This is what keeps the two
   // tables from drifting: no "alive in httpServer, dead in the pool" state, and
   // no transport object left behind for a session the client abandoned.
-  connectionPool.onSessionEvicted((sessionId: string) => {
+  // #530: the pool also reaps a session it has no entry for (an infra-error drop
+  // recycles the entry without evicting the transport) once it goes one idle
+  // window without a served request, with reason `orphaned`; same teardown. The
+  // body is synchronous on purpose: the pool walks its registrations in one pass.
+  connectionPool.onSessionEvicted(teardownSession);
+  function teardownSession(sessionId: string, reason: EvictionReason): void {
     const transport = transports.get(sessionId);
     if (transport) {
       try {
         (transport as unknown as { close?: () => void }).close?.();
       } catch (err) {
-        logger.debug(`[SESSION] Error closing transport for evicted session ${sessionId} (ignoring): ${err}`);
+        logger.debug(`[SESSION] Error closing transport for ${reason} session ${sessionId} (ignoring): ${err}`);
       }
     }
     transports.delete(sessionId);
     sessionInitPromises.delete(sessionId);
     forgetSessionOwner(sessionId);
-    logger.info(`[SESSION] Transport torn down for evicted session: ${sessionId}`);
-  });
+    connectionPool.forgetSession(sessionId);
+    logger.info(`[SESSION] Transport torn down for ${reason} session: ${sessionId}`);
+  }
 
   // Authentication middleware
   const authenticateRequest = (req: Request, res: Response): boolean => {
@@ -562,6 +569,9 @@ export async function startHttpServer(
               // is already the source of truth for this session's idle clock.
               recordSessionOwner(sid, sessionOwner);
               transports.set(sid, transport);
+              // #530: let the pool time this session even after its entry is recycled.
+              // Pooling off (USE_CONNECTION_POOL=false) has no sweep, so nothing to register.
+              if (isConnectionPoolEnabled()) connectionPool.registerSession(sid);
               logger.info(`[SESSION] Actual connection initialized for session: ${sid}`);
               resolveInit?.();
             } catch (err) {
@@ -730,8 +740,18 @@ export async function startHttpServer(
         return;
       }
 
-      // Refresh the pool's idle clock for this session (single source of truth, #167).
-      connectionPool.touch(sessionId);
+      // Refresh the pool's idle clock for this session (single source of truth, #167) and
+      // count the request in flight (#530): the orphan sweep must not reap a session whose
+      // own request is still running. The END marker is the response's completion, not a
+      // finally block: with enableJsonResponse `handleRequest` can resolve before the body
+      // is written. `stream.finished` rather than `res.once('close')`: a client that gave
+      // up during the init wait above has ALREADY closed the response, its `close` event
+      // fired before this line ran, and a listener attached now would never run, leaving
+      // the count at one for good (review round 2). `finished` calls back for an
+      // already-closed response too, and once, whether the response completed, errored
+      // or the client went away.
+      connectionPool.beginRequest(sessionId);
+      finished(res, () => connectionPool.endRequest(sessionId));
 
       // Run in AsyncLocalStorage context so tools and the adapter can access
       // sessionId (pool branch, #134) and allowedBudgets (ACL enforcement, #156).

@@ -182,7 +182,7 @@ await check('the eviction listener forgets the owner', () => {
 await check('POST session reuse checks ownership before touching the session or handling the request', () => {
   const post = src.slice(src.indexOf('app.post(httpPath'), src.indexOf('app.get(httpPath'));
   const guard = post.indexOf('sessionOwnerMatches(sessionId, resolvePrincipal(req))');
-  const touch = post.indexOf('connectionPool.touch(sessionId);');
+  const touch = post.indexOf('connectionPool.beginRequest(sessionId);'); // #530: POST touches via beginRequest
   const handle = post.lastIndexOf('transport.handleRequest(req, res, req.body)');
   assert.ok(guard > 0, 'guard present');
   assert.ok(guard < touch && guard < handle, 'guard must come first');

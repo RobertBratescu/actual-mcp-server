@@ -24,6 +24,10 @@ import { withOpTimeout } from './opTimeout.js';
 
 const DEFAULT_DATA_DIR = path.resolve(os.homedir() || '.', '.actual');
 
+/** Why a session left the pool: `evicted` is the #167 path (idle entry or explicit close),
+ *  `orphaned` is #530 (registered id, no entry, one idle window without a served request). */
+export type EvictionReason = 'evicted' | 'orphaned';
+
 interface ActualConnection {
   sessionId: string;
   initialized: boolean;
@@ -55,7 +59,23 @@ class ActualConnectionPool {
   // same window. This is callback-based eager teardown, not lazy query-on-demand:
   // a lazily-cleaned table would leak transport objects for sessions a client
   // abandons without reconnecting.
-  private evictionCallbacks: Array<(sessionId: string) => void> = [];
+  private evictionCallbacks: Array<(sessionId: string, reason: EvictionReason) => void> = [];
+  // #530: every HTTP session the transport layer registered, with the time it was last
+  // served. An entry in `connections` is not the only thing that must expire: an
+  // infra-error drop (or `switchBudget`'s slow path) removes the pool entry WITHOUT
+  // evicting the transport, and before #530 a client that then went away left its
+  // transport, owner record and init promise behind forever, because nothing timed an
+  // entry-less session. The sweep reaps a registered id that has no entry and was not
+  // served for one idle window ("orphaned"). `touch()` stamps it, so a served request
+  // keeps the session alive whether or not the entry is back.
+  private registered: Map<string, number> = new Map();
+  // #530 (review M1): requests currently being served per session. The orphan sweep skips a
+  // session with a request in flight: an entry-less session running a long operation (an
+  // import past the idle window, or a request queued behind another session's drain) has
+  // stamped its registration only at the START of the request, so without this the sweep
+  // would close its transport mid-operation. Entries have the #392 lock re-check and the
+  // #378 in-drain touch for the same hazard; registrations have neither.
+  private inFlight: Map<string, number> = new Map();
 
   constructor() {
     // Read from environment variable or default to 15
@@ -149,7 +169,27 @@ class ActualConnectionPool {
    * sweep so the two can never disagree about where the boundary is (#167).
    */
   private isExpired(conn: ActualConnection): boolean {
-    return (Date.now() - conn.lastActivity) > this.IDLE_TIMEOUT;
+    // #530: a registered session's clock is the later of the entry's lastActivity and its
+    // last served request, so a recycled entry cannot make a session look idle.
+    return this.isPastIdle(Math.max(conn.lastActivity, this.registered.get(conn.sessionId) ?? 0));
+  }
+
+  /** The one boundary for entries and registrations alike (#167, #530). */
+  private isPastIdle(lastActivity: number): boolean {
+    return (Date.now() - lastActivity) > this.IDLE_TIMEOUT;
+  }
+
+  /**
+   * #530: the transport layer registers each HTTP session when it registers the transport,
+   * so the pool can time it even while it has no entry. Idempotent; stamps "now".
+   */
+  registerSession(sessionId: string): void {
+    this.registered.set(sessionId, Date.now());
+  }
+
+  /** #530: drop a registration (idempotent). Every eviction path calls this itself. */
+  forgetSession(sessionId: string): void {
+    this.registered.delete(sessionId);
   }
 
   /**
@@ -158,13 +198,43 @@ class ActualConnectionPool {
    * this, the pool only stamped lastActivity at init/switch, so an actively
    * used session's pool clock never advanced; httpServer kept a parallel
    * activity map to compensate, which is the drift this consolidation removes.
-   * No-op for unknown sessions (does NOT create an entry).
+   * No-op for unknown sessions (does NOT create an entry). #530: also stamps the session's
+   * registration when it has one, so a session whose entry was dropped stays alive while
+   * it is being served (the #378 in-drain touch feeds the same clock). Never registers.
    */
   touch(sessionId: string): void {
+    const now = Date.now();
     const conn = this.connections.get(sessionId);
     if (conn) {
-      conn.lastActivity = Date.now();
+      conn.lastActivity = now;
     }
+    if (this.registered.has(sessionId)) {
+      this.registered.set(sessionId, now);
+    }
+  }
+
+  /**
+   * #530: mark a request as in flight for the session (and touch it). While the count is
+   * above zero the orphan sweep leaves the session alone. httpServer calls this on POST only:
+   * an open GET event stream is idle by nature and must not pin an orphan.
+   */
+  beginRequest(sessionId: string): void {
+    this.touch(sessionId);
+    this.inFlight.set(sessionId, (this.inFlight.get(sessionId) ?? 0) + 1);
+  }
+
+  /**
+   * #530: the request has ended (response finished or the client went away). Drops the
+   * in-flight count and touches, so the idle window starts from the END of a long request,
+   * not its start. Idempotent for an unknown or already-evicted session.
+   */
+  endRequest(sessionId: string): void {
+    const n = this.inFlight.get(sessionId);
+    if (n !== undefined) {
+      if (n <= 1) this.inFlight.delete(sessionId);
+      else this.inFlight.set(sessionId, n - 1);
+    }
+    this.touch(sessionId);
   }
 
   /**
@@ -172,16 +242,19 @@ class ActualConnectionPool {
    * explicit close). httpServer registers one that closes the transport and
    * drops its table entries, keeping both tables consistent (#167). Listeners
    * must not throw; any error is logged and swallowed so one bad listener
-   * cannot abort the removal of others.
+   * cannot abort the removal of others. #530: the listener also receives the reason
+   * (`evicted` for the #167 paths, `orphaned` for the entry-less sweep).
    */
-  onSessionEvicted(cb: (sessionId: string) => void): void {
+  onSessionEvicted(cb: (sessionId: string, reason: EvictionReason) => void): void {
     this.evictionCallbacks.push(cb);
   }
 
-  private fireEviction(sessionId: string): void {
+  private fireEviction(sessionId: string, reason: EvictionReason = 'evicted'): void {
+    this.registered.delete(sessionId); // #530: whatever the path, the session is gone
+    this.inFlight.delete(sessionId); // #530: a late endRequest finds nothing to decrement
     for (const cb of this.evictionCallbacks) {
       try {
-        cb(sessionId);
+        cb(sessionId, reason);
       } catch (err) {
         logger.error(`[ConnectionPool] Eviction listener threw for session ${sessionId} (ignoring):`, err);
       }
@@ -726,6 +799,24 @@ class ActualConnectionPool {
         await this.shutdownConnection(sessionId, { evict: true, onlyIfExpired: true });
       }
     }
+
+    // #530: registered sessions with no entry. Walked AFTER the entry evictions (each of
+    // which already dropped its registration) and synchronously: there is no api call to
+    // make, only the transport layer's tables to clear, so the lock is not involved and a
+    // request served in the meantime has already stamped the registration. A session with
+    // a request still in flight is never an orphan, however long that request runs.
+    const orphans: string[] = [];
+    for (const [sessionId, lastServed] of this.registered.entries()) {
+      if (!this.connections.has(sessionId) && !this.inFlight.has(sessionId) && this.isPastIdle(lastServed)) {
+        orphans.push(sessionId);
+      }
+    }
+    if (orphans.length > 0) {
+      logger.info(`[ConnectionPool] Reaping ${orphans.length} orphaned sessions (no pool entry, idle for one window)`);
+      for (const sessionId of orphans) {
+        this.fireEviction(sessionId, 'orphaned');
+      }
+    }
   }
 
   /**
@@ -780,6 +871,8 @@ class ActualConnectionPool {
       await teardown(true).catch(() => { /* cleanup is best effort */ });
     });
 
+    this.registered.clear(); // #530: the transport layer is going down with the pool
+    this.inFlight.clear();
     logger.info('[ConnectionPool] All connections shut down');
   }
 
