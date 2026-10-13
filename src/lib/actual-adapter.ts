@@ -3235,19 +3235,131 @@ export async function getSchedules(): Promise<unknown[]> {
     return Array.isArray(raw) ? raw : [];
   });
 }
+/**
+ * #547: upstream builds a schedule's rule with one `is` condition per field and STRINGIFIES the
+ * value on create (`scheduleModel.fromExternal` in loot-core/src/server/api-models.ts), so an
+ * OMITTED payee or account becomes the literal string "undefined". On update
+ * (`api/schedule-update`) an EXISTING condition takes the raw value and only a MISSING one is
+ * pushed as String(value); the server read back the literal "null" after a clear all the same,
+ * and the layer that stringifies it was not identified, so the strip treats raw null, "null"
+ * and "undefined" alike. None of them can ever equal an id, so the rule never links a
+ * transaction: the schedule shows in the UI and in actual_schedules_get but is inert. Reproduced through the server on 2026-10-13 with
+ * @actual-app/api 26.10.0 on every shape (no payee, no account, neither, payee cleared, account
+ * cleared); the control with both fields linked its import.
+ *
+ * The repair drops the dead condition from the schedule's rule inside the SAME drain as the
+ * schedule write, so the rule is right before the drain's api.sync() and no later reader sees
+ * the inert shape. Only a condition whose value is nullish or one of those two literals is
+ * dropped: if upstream stops emitting it there is nothing to strip and no rule write happens.
+ * A schedule without a payee or an account is a legitimate shape (the UI builds it and the tool
+ * description promises it), so it is repaired rather than refused.
+ *
+ * The rule is read back inside the drain, straight after a raw write (the #493 measurement:
+ * upstream can resolve before the row lands), so the read is a bounded poll with the #489 shape.
+ *
+ * A RAW null value is treated as dead too. Upstream's rule engine would match it ("transactions
+ * with no payee"), but the only way it reaches a schedule rule is through a field the caller sent
+ * as null, and the tool contract says null CLEARS the link. Stripping it enforces that contract;
+ * it never deletes a user-authored condition.
+ */
+const DEAD_SCHEDULE_CONDITION_VALUES: ReadonlySet<string> = new Set(['undefined', 'null']);
+type ScheduleLinkField = 'payee' | 'account';
+type RawScheduleRule = {
+  id?: string;
+  stage?: unknown;
+  conditionsOp?: unknown;
+  conditions?: Array<{ field?: string; value?: unknown }>;
+  actions?: Array<{ op?: string; value?: unknown }>;
+};
+
+function isDeadScheduleCondition(cond: { field?: string; value?: unknown }, fields: readonly ScheduleLinkField[]): boolean {
+  if (!fields.includes(cond?.field as ScheduleLinkField)) return false;
+  const v = cond.value;
+  return v == null || (typeof v === 'string' && DEAD_SCHEDULE_CONDITION_VALUES.has(v));
+}
+
+/** Which of the two linkable fields the caller left unset (create) or set to null (update). */
+function unsetScheduleLinkFields(input: Record<string, unknown>, mode: 'create' | 'update'): ScheduleLinkField[] {
+  const unset = (field: ScheduleLinkField) => (mode === 'create' ? input[field] == null : input[field] === null);
+  return (['payee', 'account'] as const).filter(unset);
+}
+
+async function stripDeadScheduleConditions(
+  scheduleId: string,
+  fields: readonly ScheduleLinkField[],
+  opStartedAt: number,
+  mode: 'create' | 'update',
+): Promise<void> {
+  if (fields.length === 0) return;
+  const repair = fields.map((f) => `actual_schedules_update { ${f}: null }`).join(' or ');
+  // Every message below avoids the TRANSIENT_ERROR_PATTERNS substrings ("timed out" included):
+  // _shouldDropPoolOnError would otherwise drop the session's connection. Upstream causes stay
+  // in `cause`, never in the text, for the same reason.
+  const tail = mode === 'create'
+    ? `The schedule EXISTS, so do not create it again: repair it with ${repair}, or delete it with actual_schedules_delete.`
+    : `The schedule was updated; retrying ${repair} is safe.`;
+  const failed = (what: string, err: unknown) =>
+    new Error(`Schedule "${scheduleId}" was saved, but ${what}, so the ${fields.join(' and ')} condition may not be cleared and the schedule may not link any transaction. ${tail}`, { cause: err });
+  // #494: same cap as the split poll, measured from the start of the operation.
+  const T = config.ACTUAL_OP_TIMEOUT_MS;
+  const deadline = T > 0
+    ? Math.min(Date.now() + SPLIT_VERIFY_TIMEOUT_MS, opStartedAt + Math.floor(T / 2))
+    : Date.now() + SPLIT_VERIFY_TIMEOUT_MS;
+  const boundMs = T > 0 ? Math.min(SPLIT_VERIFY_TIMEOUT_MS, Math.floor(T / 2)) : SPLIT_VERIFY_TIMEOUT_MS;
+  let rule: RawScheduleRule | undefined;
+  for (;;) {
+    let rules: RawScheduleRule[];
+    try {
+      rules = await withConcurrency(() => retry(() => rawGetRules() as Promise<RawScheduleRule[]>, { retries: 2, backoffMs: 200 }));
+    } catch (err) {
+      throw failed('its rule could not be read back', err);
+    }
+    rule = (Array.isArray(rules) ? rules : []).find((r) =>
+      (Array.isArray(r?.actions) ? r.actions : []).some((a) => a?.op === 'link-schedule' && a?.value === scheduleId)
+    );
+    if (rule) break;
+    if (Date.now() >= deadline) {
+      // Thrown from the callback so the caller sees it (the drain's closing api.sync() still
+      // saves the schedule).
+      throw new Error(
+        `Schedule "${scheduleId}" was saved, but its rule was not visible within ${boundMs}ms, so the ${fields.join(' and ')} ` +
+          `condition could not be cleared and the schedule will not link any transaction. ${tail}`
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, SPLIT_VERIFY_INTERVAL_MS));
+  }
+  const conditions = Array.isArray(rule.conditions) ? rule.conditions : [];
+  // Review round 1: the rule is in hand, so drop EVERY dead link condition, not only the fields
+  // this call unset. A schedule created before this fix with a payee and no account carries a
+  // dead account condition; the prescribed repair `{ payee: null }` must clear it too, or the
+  // call reports success and the schedule still never links. `fields` only decides whether the
+  // strip runs at all (a name-only update does not reach here) and words the error.
+  const kept = conditions.filter((c) => !isDeadScheduleCondition(c, ['payee', 'account']));
+  if (kept.length === conditions.length) return;
+  try {
+    await withConcurrency(() => retry(() => rawUpdateRule({ ...rule, conditions: kept }) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
+  } catch (err) {
+    throw failed('its rule could not be rewritten', err);
+  }
+}
 export async function createSchedule(schedule: unknown): Promise<string> {
   observability.incrementToolCall('actual.schedules.create').catch(() => {});
   return queueWriteOperation(async () => {
+    const opStartedAt = Date.now();
+    const input = (schedule ?? {}) as Record<string, unknown>;
     // Note: rawCreateSchedule(schedule) passes the external schedule object directly.
-    // Do NOT wrap in { schedule: ... } — that would double-nest and break date parsing.
-    const raw = await withConcurrency(() => retry(() => rawCreateSchedule(schedule as Record<string, unknown>) as Promise<string>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
+    // Do NOT wrap in { schedule: ... }: that would double-nest and break date parsing.
+    const raw = await withConcurrency(() => retry(() => rawCreateSchedule(input) as Promise<string>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
     const id = normalizeToId(raw);
+    // #547: an omitted payee or account is stored as a condition that can never match.
+    await stripDeadScheduleConditions(id, unsetScheduleLinkFields(input, 'create'), opStartedAt, 'create');
     return id;
   }, { preservesListings: PRESERVES_ALL_ENTITY_LISTINGS });
 }
 export async function updateSchedule(id: string, fields: unknown, resetNextDate?: boolean): Promise<void> {
   observability.incrementToolCall('actual.schedules.update').catch(() => {});
   return queueWriteOperation(async () => {
+    const opStartedAt = Date.now();
     // #527: upstream MERGES a partial update, so `amountOp` alone keeps the stored amount and
     // `amount` alone keeps the stored op. Whether the pair fits ('isbetween' takes a
     // { num1, num2 } range, every other op a number) therefore depends on the stored row when
@@ -3275,6 +3387,8 @@ export async function updateSchedule(id: string, fields: unknown, resetNextDate?
       }
     }
     await withConcurrency(() => retry(() => rawUpdateSchedule(id, patch, resetNextDate) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
+    // #547: a payee or account cleared with null is stored as the literal string "null".
+    await stripDeadScheduleConditions(id, unsetScheduleLinkFields(patch, 'update'), opStartedAt, 'update');
   }, { preservesListings: PRESERVES_ALL_ENTITY_LISTINGS });
 }
 /**

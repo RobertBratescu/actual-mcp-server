@@ -1619,6 +1619,89 @@ test.describe('Docker E2E - ALL 84 TOOLS', () => {
     expect(schedules.find((s: any) => s.id === schedule.id)?.name).toBe(updatedName);
   });
 
+  // #547: a schedule without a payee or an account used to carry a rule condition that can never
+  // match (upstream stringifies the absent field to "undefined", and a cleared one to "null"), so
+  // it never linked a transaction. The proof is a LINK on the live budget, not a read-back: every
+  // read-back in this block stayed green while the defect was live.
+  // Returns the stored row for each imported row, in input order, located by the ids the
+  // import reports in `added` (never by amount, so two rows may share one).
+  const importAndRead = async (mcp: any, accountId: string, rows: Array<Record<string, unknown>>) => {
+    const imported = await mcp.call('actual_transactions_import', { accountId, txs: rows });
+    const added: string[] = imported?.added ?? imported?.result?.added ?? [];
+    expect(added.length, 'every imported row must be added').toBe(rows.length);
+    const d = await mcp.call('actual_transactions_get', { accountId });
+    const stored = (Array.isArray(d) ? d : (d?.result ?? [])) as any[];
+    return added.map((id) => {
+      const row = stored.find((t: any) => t?.id === id);
+      expect(row, `imported row ${id} is readable`).toBeTruthy();
+      return row;
+    });
+  };
+
+  test('actual_schedules_create - a schedule without a payee links a matching import (#547)', async ({ mcp, makeAccount, makeSchedule }) => {
+    const account = await makeAccount();
+    const schedule = await makeSchedule({ account: account.id, date: today(), amount: -7547 });
+    const suffix = uniqueSuffix();
+    const [match, other] = await importAndRead(mcp, account.id, [
+      { date: today(), amount: -7547, imported_id: `e2e-547-match-${suffix}` },
+      { date: today(), amount: -2000, imported_id: `e2e-547-other-${suffix}` },
+    ]);
+    expect(match?.schedule, 'the matching import is linked').toBe(schedule.id);
+    expect(other?.schedule ?? null, 'a different amount is not linked').toBeNull();
+  });
+
+  test('actual_schedules_create - a schedule without an account links a matching import by payee (#547)', async ({ mcp, makeAccount, makePayee, makeSchedule }) => {
+    const account = await makeAccount();
+    const payee = await makePayee();
+    const schedule = await makeSchedule({ payee: payee.id, date: today(), amount: -7647 });
+    const suffix = uniqueSuffix();
+    const [withPayee, withoutPayee] = await importAndRead(mcp, account.id, [
+      { date: today(), amount: -7647, payee: payee.id, imported_id: `e2e-547-bypayee-${suffix}` },
+      { date: today(), amount: -7647, imported_id: `e2e-547-nopayee-${suffix}` },
+    ]);
+    expect(withPayee?.schedule, 'linked through the payee alone').toBe(schedule.id);
+    expect(withoutPayee?.schedule ?? null, 'same amount, no payee: not linked').toBeNull();
+  });
+
+  test('actual_schedules_update - clearing the account keeps the schedule linkable (#547)', async ({ mcp, makeAccount, makePayee, makeSchedule }) => {
+    const accountA = await makeAccount();
+    const accountB = await makeAccount();
+    const payee = await makePayee();
+    const schedule = await makeSchedule({ account: accountA.id, payee: payee.id, date: today(), amount: -7847 });
+
+    const data = await mcp.call('actual_schedules_update', { id: schedule.id, account: null });
+    expect(data?.success ?? data?.result?.success).toBe(true);
+
+    const [row] = await importAndRead(mcp, accountB.id, [
+      { date: today(), amount: -7847, payee: payee.id, imported_id: `e2e-547-otheracct-${uniqueSuffix()}` },
+    ]);
+    expect(row?.schedule, 'an import into another account links by payee').toBe(schedule.id);
+  });
+
+  test('actual_schedules_update - clearing the payee keeps the schedule linkable (#547)', async ({ mcp, makeAccount, makePayee, makeSchedule }) => {
+    const account = await makeAccount();
+    const payee = await makePayee();
+    const schedule = await makeSchedule({ account: account.id, payee: payee.id, date: today(), amount: -7747 });
+
+    const data = await mcp.call('actual_schedules_update', { id: schedule.id, payee: null });
+    expect(data?.success ?? data?.result?.success).toBe(true);
+
+    const [row] = await importAndRead(mcp, account.id, [
+      { date: today(), amount: -7747, imported_id: `e2e-547-cleared-${uniqueSuffix()}` },
+    ]);
+    expect(row?.schedule, 'a payee-less import links after the clear').toBe(schedule.id);
+
+    // A later update that does not touch payee must not bring the dead condition back
+    // (upstream re-adds a condition only inside its payee and account cases).
+    const renamed = await mcp.call('actual_schedules_update', { id: schedule.id, name: `${schedule.name}-renamed` });
+    expect(renamed?.success ?? renamed?.result?.success).toBe(true);
+    const rulesRes = await mcp.call('actual_rules_get', {});
+    const rules = (rulesRes?.rules ?? rulesRes?.result?.rules ?? rulesRes?.result ?? rulesRes) as any[];
+    const rule = (Array.isArray(rules) ? rules : []).find((r: any) => (r?.actions ?? []).some((a: any) => a?.op === 'link-schedule' && a?.value === schedule.id));
+    expect(rule, 'the schedule rule is visible').toBeTruthy();
+    expect((rule?.conditions ?? []).some((c: any) => c?.field === 'payee'), 'no payee condition after a name-only update').toBe(false);
+  });
+
   // #527: 'isbetween' takes a { num1, num2 } range; a scalar is stored by upstream but can
   // never match a transaction, so it is refused before the write.
   const readSchedule = async (mcp: any, id: string) => {

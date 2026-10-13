@@ -174,6 +174,9 @@ export type Fixtures = {
     /** A number for 'is' and 'isapprox', or a { num1, num2 } range for 'isbetween' (#527). */
     amount?: number | { num1: number; num2: number };
     amountOp?: 'is' | 'isapprox' | 'isbetween';
+    /** #547: both optional; a schedule without one is a legitimate shape that must still link. */
+    payee?: string;
+    account?: string;
   }) => Promise<ScheduleRef>;
 };
 
@@ -473,6 +476,8 @@ export const test = base.extend<Fixtures, WorkerFixtures>({
         amount: opts.amount ?? -5000,
         amountOp: opts.amountOp ?? 'is',
         posts_transaction: false,
+        ...(opts.payee ? { payee: opts.payee } : {}),
+        ...(opts.account ? { account: opts.account } : {}),
       });
       const id = (typeof data === 'string' ? data : data?.id) as string;
       cleanup.add(CLEANUP_ORDER.schedule, `schedule ${name}`, async () => {

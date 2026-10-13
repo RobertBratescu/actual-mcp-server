@@ -9,6 +9,7 @@ import { fail } from '../assert.js';
  *             update with resetNextDate • delete created schedule
  *             isbetween range round-trip (#527)
  *             monthly last-day pattern: next_date is the month end (#478)
+ *             a payee-less schedule LINKS a matching import (#547)
  *   negative: delete non-existent UUID (expect error, not crash)
  *             scalar amount with isbetween refused (#527)
  *             patterns on a weekly schedule refused (#478)
@@ -170,6 +171,61 @@ export async function scheduleTests(client, context) {
       }
     } catch (err) {
       fail(`update recurring + resetNextDate failed: ${err.message}`);
+    }
+  }
+
+  // ── 7b. A payee-less schedule links a matching import (#547) ───────────
+  // The proof is a LINK, not a read-back: before the fix the schedule listed fine and never
+  // linked anything. Disposable account, deleted in the finally block (zero residue).
+  console.log('\nLinking a payee-less schedule to a matching import (#547)...');
+  {
+    let linkAccId;
+    let linkSchedId;
+    try {
+      const acc = await callTool('actual_accounts_create', { name: `MCP-Test-Link547-${timestamp}`, balance: 0 });
+      linkAccId = acc?.id ?? acc?.result ?? acc;
+      const today = new Date().toISOString().slice(0, 10);
+      const sched = await callTool('actual_schedules_create', {
+        name: `MCP-Schedule-Link547-${timestamp}`,
+        date: today,
+        amount: -7547,
+        amountOp: 'is',
+        account: linkAccId,
+        posts_transaction: false,
+      });
+      linkSchedId = sched?.id ?? sched?.result?.id ?? sched;
+      const imported = await callTool('actual_transactions_import', {
+        accountId: linkAccId,
+        txs: [
+          { date: today, amount: -7547, imported_id: `mcp-547-match-${timestamp}` },
+          { date: today, amount: -2000, imported_id: `mcp-547-other-${timestamp}` },
+        ],
+      });
+      const added = imported?.added ?? imported?.result?.added ?? [];
+      if (added.length !== 2) fail(`#547 import: expected 2 added, got ${JSON.stringify(imported).slice(0, 120)}`);
+      const got = await callTool('actual_transactions_get', { accountId: linkAccId });
+      const rows = Array.isArray(got) ? got : (got?.result ?? []);
+      const match = rows.find((t) => t?.amount === -7547);
+      const other = rows.find((t) => t?.amount === -2000);
+      if (match?.schedule === linkSchedId) {
+        console.log('  ✓ #547: the matching import is linked to the payee-less schedule');
+      } else {
+        fail(`#547: matching import not linked (schedule=${JSON.stringify(match?.schedule ?? null)})`);
+      }
+      if ((other?.schedule ?? null) === null) {
+        console.log('  ✓ #547: a different amount is not linked');
+      } else {
+        fail(`#547: the -2000 import was linked to ${other.schedule}`);
+      }
+    } catch (err) {
+      fail(`#547 link check failed: ${err.message}`);
+    } finally {
+      if (linkSchedId) {
+        try { await callTool('actual_schedules_delete', { id: linkSchedId }); } catch (err) { fail(`#547 cleanup schedule: ${err.message}`); }
+      }
+      if (linkAccId) {
+        try { await callTool('actual_accounts_delete', { id: linkAccId }); } catch (err) { fail(`#547 cleanup account: ${err.message}`); }
+      }
     }
   }
 
