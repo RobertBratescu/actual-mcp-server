@@ -42,8 +42,8 @@ Close the gaps between what `@actual-app/api` offers and what the tools expose. 
 Outcome (2026-10-11): done. All four planned tickets shipped in v0.22.31 with dual-transport evidence: #515 (setPreference accepted as a gap), #527 (isbetween takes a { num1, num2 } range, measured live before shipping), #478 (monthly patterns) and #514 (actual_transactions_merge, tool count 83 to 84). The drift lane reports no unaccepted method at @actual-app/api 26.10.0. One change of shape: the two transfer merge cases run in the live suite instead of docker E2E, because that stack runs NODE_ENV=test, where upstream deadlocks a transfer merge. #547 (a payee-less schedule never links) surfaced during #527 and went to Backlog.
 
 ## Phase: Session and transport hygiene
-state: planned
-plan:
+state: open
+plan: docs/plans/session-and-transport-hygiene.md
 
 Split from "Backlog": Four gate-ready lows from the v0.22.18 and v0.22.19 reviews had no phase that would ever schedule them: they are about HTTP session bookkeeping, transport error logging and OIDC refresh-token guidance, not decisions deferred on purpose. Grouping them gives them a slot after API coverage and schedules.
 
