@@ -1,7 +1,7 @@
 # Architecture
 
 **Project:** Actual MCP Server  
-**Version:** 0.22.34  
+**Version:** 0.22.35  
 **Last Updated:** 2026-06-07
 
 ---
