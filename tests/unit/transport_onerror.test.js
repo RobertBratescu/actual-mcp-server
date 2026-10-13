@@ -2,10 +2,12 @@
 //
 // #504: the SDK reports transport and protocol errors through server.onerror, which
 // nothing set. attachTransportErrorLogger installs a handler that logs a sanitized,
-// rate-limited record with a CONSTANT message. Cases U1 to U9 follow the ticket.
+// rate-limited record with a CONSTANT message. Cases U1 to U9 follow the ticket;
+// #536 adds U10 to U19 for the window-end summary (a burst that was the last error
+// ever used to lose its suppressed count).
 //
 // "Absent" assertions check the message AND every string value in meta, so a body hidden
-// in meta fails too. U7 and U8 run in a fresh child process (order independent; an
+// in meta fails too. U7, U8, U13 and U16 run in a fresh child process (order independent; an
 // in-process stdout spy is defeated by the console hijack in src/logger.ts).
 //
 // Run: node tests/unit/transport_onerror.test.js (build first)
@@ -20,7 +22,9 @@ import { z } from 'zod';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const MOD_PATH = join(ROOT, 'dist', 'src', 'lib', 'transportErrorLogger.js');
 const MOD_URL = pathToFileURL(MOD_PATH).href;
-const { attachTransportErrorLogger, createWindowLimiter, sanitizeTransportErrorDetail } = await import(MOD_URL);
+const { attachTransportErrorLogger, createWindowLimiter, sanitizeTransportErrorDetail, reportSuppressedTransportErrors } = await import(MOD_URL);
+const { requestContext } = await import(pathToFileURL(join(ROOT, 'dist', 'src', 'lib', 'requestContext.js')).href);
+const { buildLogFormat } = await import(pathToFileURL(join(ROOT, 'dist', 'src', 'logger.js')).href);
 
 let passed = 0;
 let failed = 0;
@@ -202,11 +206,12 @@ check('U6 shared limiter bounds two sessions; next window reports suppressed', (
   assert.ok(!('suppressed' in records[51].meta));
 });
 
-function runChild(script, extraEnv = {}) {
+function runChild(script, extraEnv = {}, opts = {}) {
   return spawnSync(process.execPath, ['--input-type=module', '-e', script], {
     cwd: ROOT,
     encoding: 'utf8',
     env: { ...process.env, MCP_STDIO_MODE: 'true', LOG_FORMAT: 'json', ...extraEnv },
+    ...opts,
   });
 }
 
@@ -252,6 +257,206 @@ check('U9 both call sites are wired once, after new Server( and before server.co
     assert.ok(iNew >= 0 && iNew < iCall, `${file}: call before new Server(`);
     assert.ok(iConnect > iCall, `${file}: connect before call`);
   }
+});
+
+
+// ---------------------------------------------------------------------------
+// #536: the window-end summary. U10 to U19 (U10b: delay arithmetic and clamp).
+// ---------------------------------------------------------------------------
+console.log('\n[#536] window-end summary');
+
+function flushLimiter(max = 2, windowMs = 60_000) {
+  const clock = { t: 0 };
+  const scheduled = [];
+  const ended = [];
+  const limiter = createWindowLimiter({
+    max,
+    windowMs,
+    now: () => clock.t,
+    schedule: (fn, delayMs) => scheduled.push({ fn, delayMs }),
+    onWindowEnd: (n) => ended.push(n),
+  });
+  return { clock, scheduled, ended, limiter };
+}
+
+check('U10 burst then silence: one flush scheduled for the window end, reports once, a second fire reports nothing', () => {
+  const { scheduled, ended, limiter } = flushLimiter();
+  for (let i = 0; i < 5; i++) limiter.take();
+  assert.strictEqual(scheduled.length, 1, 'one schedule call for the whole burst');
+  assert.strictEqual(scheduled[0].delayMs, 60_000);
+  assert.deepStrictEqual(ended, []);
+  scheduled[0].fn();
+  assert.deepStrictEqual(ended, [3]);
+  scheduled[0].fn();
+  assert.deepStrictEqual(ended, [3], 'a second fire has nothing to report');
+});
+
+check('U10b the flush delay is the remaining window, clamped to [0, windowMs]', () => {
+  {
+    const { clock, scheduled, limiter } = flushLimiter();
+    limiter.take();
+    limiter.take();
+    clock.t = 45_000;
+    limiter.take();
+    assert.strictEqual(scheduled[0].delayMs, 15_000, 'first suppression 45s in: 15s remain');
+  }
+  {
+    const { clock, scheduled, limiter } = flushLimiter();
+    limiter.take();
+    limiter.take();
+    clock.t = -26 * 86_400_000; // backward clock step past Node's 2^31 ms timer limit
+    limiter.take();
+    assert.strictEqual(scheduled[0].delayMs, 60_000, 'a backward clock step is clamped to one window');
+  }
+});
+
+check('U11 no suppression: no timer, no report', () => {
+  const { scheduled, ended, limiter } = flushLimiter();
+  limiter.take();
+  limiter.take();
+  assert.strictEqual(scheduled.length, 0);
+  assert.strictEqual(ended.length, 0);
+});
+
+check('U12 a count is reported exactly once in both orders (allowed call first, or flush first)', () => {
+  {
+    const { clock, scheduled, ended, limiter } = flushLimiter();
+    for (let i = 0; i < 5; i++) limiter.take();
+    clock.t = 60_000;
+    const allowed = limiter.take();
+    assert.strictEqual(allowed.suppressed, 3, 'the next allowed call carries the count');
+    scheduled[0].fn();
+    assert.deepStrictEqual(ended, [], 'the flush finds nothing left');
+  }
+  {
+    const { clock, scheduled, ended, limiter } = flushLimiter();
+    for (let i = 0; i < 5; i++) limiter.take();
+    scheduled[0].fn();
+    assert.deepStrictEqual(ended, [3]);
+    clock.t = 60_000;
+    const allowed = limiter.take();
+    assert.strictEqual(allowed.suppressed, 0, 'the allowed call has nothing left to report');
+  }
+});
+
+check('U13 the default schedule does not hold the process open (child exits well inside the 60 s window)', () => {
+  const script = `
+    const m = await import(${JSON.stringify(MOD_URL)});
+    let ended = 0;
+    const l = m.createWindowLimiter({ max: 1, windowMs: 60_000, now: Date.now, onWindowEnd: () => { ended++; } });
+    l.take(); l.take(); l.take();
+    process.stderr.write('ENDED=' + ended + '\\n');
+  `;
+  const started = Date.now();
+  const r = runChild(script, {}, { timeout: 10_000 });
+  assert.strictEqual(r.status, 0, `status ${r.status} signal ${r.signal} stderr ${r.stderr}`);
+  assert.ok(Date.now() - started < 10_000, 'the child was held open by the flush timer');
+  assert.ok(/ENDED=0\n/.test(r.stderr), `the flush must not have fired yet: ${r.stderr}`);
+  assert.strictEqual(r.stdout, '');
+});
+
+check('U14 the reporter logs the constant message with only the count, and a throwing logger does not throw', () => {
+  const records = [];
+  reportSuppressedTransportErrors(7, stubLogger(records));
+  assert.strictEqual(records.length, 1);
+  assert.strictEqual(records[0].m, 'MCP transport errors suppressed');
+  assert.deepStrictEqual(records[0].meta, { suppressed: 7 });
+  const bad = { warn() { throw new Error('logger down'); }, info() {}, debug() {}, error() {} };
+  assert.doesNotThrow(() => reportSuppressedTransportErrors(1, bad));
+});
+
+check('U15 a throwing onWindowEnd or schedule escapes neither take() nor the fired flush', () => {
+  const scheduled = [];
+  const l1 = createWindowLimiter({
+    max: 1, windowMs: 60_000, now: () => 0,
+    schedule: (fn) => scheduled.push(fn),
+    onWindowEnd: () => { throw new Error('reporter down'); },
+  });
+  l1.take();
+  assert.doesNotThrow(() => l1.take());
+  assert.strictEqual(scheduled.length, 1);
+  assert.doesNotThrow(() => scheduled[0]());
+  let calls = 0;
+  const l2 = createWindowLimiter({
+    max: 1, windowMs: 60_000, now: () => 0,
+    schedule: () => { calls++; throw new Error('no timers'); },
+    onWindowEnd: () => {},
+  });
+  l2.take();
+  assert.doesNotThrow(() => l2.take());
+  assert.doesNotThrow(() => l2.take());
+  assert.strictEqual(calls, 2, 'a failed schedule is retried on the next suppression');
+});
+
+check('U16 under stdio the summary goes to stderr and stdout stays empty (with witness)', () => {
+  const body = (burst) => `
+    const m = await import(${JSON.stringify(MOD_URL)});
+    const l = m.createWindowLimiter({ max: 1, windowMs: 50, now: Date.now, onWindowEnd: (n) => m.reportSuppressedTransportErrors(n) });
+    l.take();
+    ${burst ? 'l.take(); l.take();' : ''}
+    await new Promise((r) => setTimeout(r, 300));
+  `;
+  const hit = runChild(body(true));
+  assert.strictEqual(hit.stdout, '', `stdout: ${hit.stdout}`);
+  assert.ok(hit.stderr.includes('MCP transport errors suppressed'), `stderr: ${hit.stderr}`);
+  assert.ok(/"suppressed":2/.test(hit.stderr), `count missing: ${hit.stderr}`);
+  const miss = runChild(body(false));
+  assert.ok(!miss.stderr.includes('MCP transport errors suppressed'));
+});
+
+check('U17 the module limiter is built with the reporter as onWindowEnd', () => {
+  const compiled = readFileSync(MOD_PATH, 'utf8');
+  const i = compiled.indexOf('const moduleLimiter = createWindowLimiter(');
+  assert.ok(i >= 0, 'module limiter not found');
+  const call = compiled.slice(i, compiled.indexOf(');', i));
+  assert.ok(/onWindowEnd:\s*\(n\)\s*=>\s*reportSuppressedTransportErrors\(n\)/.test(call), call);
+});
+
+check('U18 after a flush the next suppression schedules a fresh timer; a stale flush loses nothing', () => {
+  {
+    const { clock, scheduled, ended, limiter } = flushLimiter();
+    for (let i = 0; i < 5; i++) limiter.take();
+    scheduled[0].fn();
+    assert.deepStrictEqual(ended, [3]);
+    clock.t = 60_000;
+    for (let i = 0; i < 4; i++) limiter.take();
+    assert.strictEqual(scheduled.length, 2, 'a second timer for the new window');
+    assert.strictEqual(scheduled[1].delayMs, 60_000);
+    scheduled[1].fn();
+    assert.deepStrictEqual(ended, [3, 2]);
+  }
+  {
+    const { clock, scheduled, ended, limiter } = flushLimiter();
+    for (let i = 0; i < 3; i++) limiter.take();
+    clock.t = 60_000;
+    const first = limiter.take();
+    assert.strictEqual(first.suppressed, 1);
+    limiter.take();
+    limiter.take();
+    limiter.take();
+    scheduled[0].fn();
+    assert.deepStrictEqual(ended, [2], 'the stale flush reports the new window so far');
+    limiter.take();
+    assert.strictEqual(scheduled.length, 2, 'the next suppression schedules again');
+    scheduled[1].fn();
+    assert.deepStrictEqual(ended, [2, 1]);
+  }
+});
+
+check('U19 the summary is logged outside the request context, so it carries no session ids', () => {
+  let storeAtCall = 'unset';
+  const probe = { warn() { storeAtCall = requestContext.getStore(); }, info() {}, debug() {}, error() {} };
+  requestContext.run({ sessionId: 's1', requestId: 'r1' }, () => reportSuppressedTransportErrors(3, probe));
+  assert.strictEqual(storeAtCall, undefined, `store was ${JSON.stringify(storeAtCall)}`);
+  const MESSAGE = Symbol.for('message');
+  requestContext.run({ sessionId: 's1', requestId: 'r1' }, () => {
+    const inside = JSON.parse(buildLogFormat(true).transform({ level: 'warn', message: 'x', module: 'T' }, {})[MESSAGE]);
+    assert.strictEqual(inside.sessionId, 's1', 'control: the store is stamped inside the context');
+    const rec = requestContext.exit(() =>
+      JSON.parse(buildLogFormat(true).transform({ level: 'warn', message: 'x', module: 'T' }, {})[MESSAGE])
+    );
+    assert.ok(!('sessionId' in rec) && !('requestId' in rec), JSON.stringify(rec));
+  });
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
