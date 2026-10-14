@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        <!-- template-version: 5 -->
+        <!-- template-version: 6 -->
         ## Infrastructure Task
         For dependency audits, CI/CD, Docker, deployment, and configuration work.
         Issues created by the `/dep-auditor` command use this template automatically.
@@ -135,18 +135,24 @@ body:
     validations:
       required: true
 
+  - type: textarea
+    id: docs_impact
+    attributes:
+      label: Documentation impact
+      description: Which documentation does this change affect, in the docs tree and the root README? "None" needs a reason.
+      placeholder: |
+        - **Docs affected:**
+        - **README impact:**
+        - **Why not, if none:**
+    validations:
+      required: true
+
   - type: markdown
     attributes:
       value: |
         ---
-        ## Agent Review Scores
+        ## Readiness gate
 
-        > Run `/review-ticket <issue-number>` after filing to trigger the readiness gate.
-        > All 4 agents must score **10/10** before implementation begins.
-
-        | Agent | Score | Status | Notes |
-        |---|---|---|---|
-        | tool-author | — | — | |
-        | qa | — | — | |
-        | release-manager | — | — | |
-        | actual-api | — | — | |
+        > Run `/gate-ticket <issue-number>` after filing to trigger the readiness gate.
+        > It runs mechanical checks plus one critic, with project lenses joining by label,
+        > and must return **PASS** before implementation begins.

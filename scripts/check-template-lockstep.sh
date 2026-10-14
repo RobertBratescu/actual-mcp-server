@@ -8,9 +8,11 @@
 # anti-drift lock. Templates that carry no marker (e.g. contribution.yml) are exempt.
 #
 # Usage: check-template-lockstep.sh [ISSUE_TEMPLATE_DIR] [CANONICAL_DOC]
-#   With no argument, resolves the first existing of
-#   .forgejo/ISSUE_TEMPLATE, .gitea/ISSUE_TEMPLATE, .github/ISSUE_TEMPLATE (host-aware),
-#   and includes docs/guides/ticket-standards.md if present.
+#   With no argument, resolves the first existing template dir, HOST-grouped so a live
+#   Forgejo/Gitea dir always outranks a stale retained .github one, uppercase before the
+#   legacy lowercase variant within each host (.forgejo/ISSUE_TEMPLATE, .forgejo/issue_template,
+#   .gitea/ISSUE_TEMPLATE, .gitea/issue_template, .github/ISSUE_TEMPLATE), warns when both
+#   casings of one host exist, and includes docs/guides/ticket-standards.md if present.
 #   An explicit ISSUE_TEMPLATE_DIR is honoured as-is (the tests pass an absolute fixture
 #   path); the canonical doc is then only checked when passed explicitly as $2, so unit
 #   tests stay hermetic and never pick up the real repo doc.
@@ -24,13 +26,31 @@
 set -uo pipefail
 
 if [ "$#" -eq 0 ]; then
-  cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+  CDPATH= cd -- "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 fi
 
 resolve_dir() {
-  local d
-  for d in .forgejo/ISSUE_TEMPLATE .gitea/ISSUE_TEMPLATE .github/ISSUE_TEMPLATE; do
-    [ -d "$d" ] && { printf '%s\n' "$d"; return 0; }
+  # Uppercase is canonical. The lowercase variants are accepted because forge-adapt v34 and
+  # earlier instructed `.forgejo/issue_template` on Forgejo installs (issue #61); those repos
+  # must not be left silently unguarded. Ordering is HOST-grouped (all Forgejo dirs before
+  # Gitea before GitHub): a migrated repo that kept a stale `.github/ISSUE_TEMPLATE` must have
+  # its LIVE lowercase Forgejo dir checked, not the stale GitHub one. Within a host, uppercase
+  # wins and a WARNING names the duplicate: a silent first-match would recreate the original
+  # bug one level down.
+  # The -ef guard keeps case-insensitive filesystems (macOS) from warning about one directory
+  # reachable under two names.
+  local d lower
+  for d in .forgejo/ISSUE_TEMPLATE .forgejo/issue_template \
+           .gitea/ISSUE_TEMPLATE .gitea/issue_template .github/ISSUE_TEMPLATE; do
+    [ -d "$d" ] || continue
+    case "$d" in
+      */ISSUE_TEMPLATE)
+        lower="${d%/*}/issue_template"
+        if [ -d "$lower" ] && ! [ "$lower" -ef "$d" ]; then
+          echo "check-template-lockstep: WARNING: both $d and $lower exist; checking $d (merge the two)" >&2
+        fi ;;
+    esac
+    printf '%s\n' "$d"; return 0
   done
   return 1
 }

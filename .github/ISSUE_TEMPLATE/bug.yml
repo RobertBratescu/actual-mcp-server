@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        <!-- template-version: 5 -->
+        <!-- template-version: 6 -->
         ## Bug Report
         Please fill in all required fields so we can reproduce and assess the issue quickly.
 
@@ -110,6 +110,22 @@ body:
       required: false
 
   - type: textarea
+    id: personal_data
+    attributes:
+      label: Personal data handling
+      description: Does this bug expose, leak or mishandle personal data? If so, state all seven facts; otherwise mark N/A with the reason.
+      value: |
+        - **Personal-data fields affected:**
+        - **Storage location and encryption at rest:**
+        - **Erasure, including cascading deletion:**
+        - **Portability (export on request):**
+        - **Minimisation and retention:**
+        - **Legal basis:**
+        - **Cross-border transfer:**
+    validations:
+      required: true
+
+  - type: textarea
     id: security
     attributes:
       label: Security impact
@@ -209,18 +225,24 @@ body:
     validations:
       required: false
 
+  - type: textarea
+    id: docs_impact
+    attributes:
+      label: Documentation impact
+      description: Which documentation does this change affect, in the docs tree and the root README? "None" needs a reason.
+      placeholder: |
+        - **Docs affected:**
+        - **README impact:**
+        - **Why not, if none:**
+    validations:
+      required: true
+
   - type: markdown
     attributes:
       value: |
         ---
-        ## Agent Review Scores
+        ## Readiness gate
 
-        > Run `/review-ticket <issue-number>` after filing to trigger the readiness gate.
-        > All 4 agents must score **10/10** before implementation begins.
-
-        | Agent | Score | Status | Notes |
-        |---|---|---|---|
-        | tool-author | — | — | |
-        | qa | — | — | |
-        | release-manager | — | — | |
-        | actual-api | — | — | |
+        > Run `/gate-ticket <issue-number>` after filing to trigger the readiness gate.
+        > It runs mechanical checks plus one critic, with project lenses joining by label,
+        > and must return **PASS** before implementation begins.
