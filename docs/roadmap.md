@@ -42,10 +42,12 @@ Close the gaps between what `@actual-app/api` offers and what the tools expose. 
 Outcome (2026-10-11): done. All four planned tickets shipped in v0.22.31 with dual-transport evidence: #515 (setPreference accepted as a gap), #527 (isbetween takes a { num1, num2 } range, measured live before shipping), #478 (monthly patterns) and #514 (actual_transactions_merge, tool count 83 to 84). The drift lane reports no unaccepted method at @actual-app/api 26.10.0. One change of shape: the two transfer merge cases run in the live suite instead of docker E2E, because that stack runs NODE_ENV=test, where upstream deadlocks a transfer merge. #547 (a payee-less schedule never links) surfaced during #527 and went to Backlog.
 
 ## Phase: Session and transport hygiene
-state: open
+state: done
 plan: docs/plans/session-and-transport-hygiene.md
 
 Split from "Backlog": Four gate-ready lows from the v0.22.18 and v0.22.19 reviews had no phase that would ever schedule them: they are about HTTP session bookkeeping, transport error logging and OIDC refresh-token guidance, not decisions deferred on purpose. Grouping them gives them a slot after API coverage and schedules.
+
+Outcome (2026-10-14): done. The four planned tickets (#529, #530, #536, #488) shipped in v0.22.32 to v0.22.37 with dual-transport evidence, one ticket per commit and patch bump. Two tickets appeared during the work and shipped in the same train: #551 (an invalid AUTH_BUDGET_ACL degraded to an open ACL; now refuses startup) and #550 (the init-failure cause reply was served to a non-owner principal). The optional #529 item (moving the GET ownership check ahead of the transport presence check) was deliberately not done; the reason is written at the GET route in httpServer.ts. No work was skipped and no follow-up tickets were needed.
 
 ## Phase: Backlog
 state: backlog
