@@ -49,6 +49,12 @@ Split from "Backlog": Four gate-ready lows from the v0.22.18 and v0.22.19 review
 
 Outcome (2026-10-14): done. The four planned tickets (#529, #530, #536, #488) shipped in v0.22.32 to v0.22.37 with dual-transport evidence, one ticket per commit and patch bump. Two tickets appeared during the work and shipped in the same train: #551 (an invalid AUTH_BUDGET_ACL degraded to an open ACL; now refuses startup) and #550 (the init-failure cause reply was served to a non-owner principal). The optional #529 item (moving the GET ownership check ahead of the transport presence check) was deliberately not done; the reason is written at the GET route in httpServer.ts. No work was skipped and no follow-up tickets were needed.
 
+## Phase: Reporter follow-ups
+state: open
+plan: docs/plans/reporter-follow-ups.md
+
+Split from Backlog: the fixes split out of three outside reports, #555 (tool content in the logs), #552 (HTTP DELETE returns 404) and #553 (inaccurate server instructions, guessed names in queries). Three batches, each released before the next: logs first because budget data reaches production logs today, then session teardown because an outside user is affected, then instructions.
+
 ## Phase: Backlog
 state: backlog
 
