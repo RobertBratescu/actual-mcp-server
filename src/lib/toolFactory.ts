@@ -17,6 +17,7 @@ import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import { createModuleLogger } from './loggerFactory.js';
 import observability from '../observability.js';
+import { errorLogFields } from './errors.js';
 
 const log = createModuleLogger('TOOLS');
 
@@ -126,9 +127,9 @@ export function createTool<TInput = any, TOutput = any>(
         
         return { result };
       } catch (error) {
-        // Log error with details
+        // Class and log-safe text only (#559): the message and stack can quote input.
         const duration = Date.now() - startTime;
-        log.error(`${name} failed after ${duration}ms`, error as Error);
+        log.error(`${name} failed after ${duration}ms`, undefined, { tool: name, durationMs: duration, outcome: 'error', ...errorLogFields(error) });
         
         // Track observability (still increment even on failure)
         await observability.incrementToolCall(name);

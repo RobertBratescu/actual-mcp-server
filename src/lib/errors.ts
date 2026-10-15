@@ -169,3 +169,38 @@ export function constraintErrorMsg(entityType: string, id: string, listTool: str
   return `Failed to delete ${entityType.toLowerCase()} "${id}". ` +
     `It may be referenced by other records. Use ${listTool} to verify it exists.`;
 }
+
+/**
+ * Log-safe error text (#559). An error's MESSAGE is for the client and may quote what the
+ * caller sent: a category name, a query, a rule value, or upstream text we do not control.
+ * The server never logs it. `withLogMessage` attaches a separate, content-free sentence
+ * that the `[TOOL ERROR]` record may log instead; set it where the error is thrown, and
+ * keep anything the caller supplied out of it.
+ */
+const LOG_MESSAGE = Symbol.for('actual-mcp-server.logMessage');
+
+export function withLogMessage<E extends Error>(error: E, logMessage: string): E {
+  Object.defineProperty(error, LOG_MESSAGE, { value: logMessage, enumerable: false });
+  return error;
+}
+
+/**
+ * The fields a failure record may carry about an error, and nothing else: its class, a
+ * refusal's kind, a Node system error code such as ECONNRESET, and the throw site's
+ * log-safe text when it set one. Fails closed: an error with no log-safe text is logged
+ * by class alone. The class is read from the PROTOTYPE, because an own `constructor`
+ * property could carry anything; the code only when it has the all-caps system shape.
+ */
+type ErrorLogFields = { errorClass: string; refusalKind?: RefusalKind; code?: string; logMessage?: string };
+
+export function errorLogFields(error: unknown): ErrorLogFields {
+  const errorClass =
+    error instanceof Error ? (Object.getPrototypeOf(error)?.constructor?.name || 'Error') : error === null ? 'null' : typeof error;
+  const fields: ErrorLogFields = { errorClass };
+  if (isPreflightRefusal(error)) fields.refusalKind = error.refusalKind;
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  if (typeof code === 'string' && /^E[A-Z0-9_]{1,40}$/.test(code)) fields.code = code;
+  const logMessage = typeof error === 'object' && error !== null ? (error as Record<symbol, unknown>)[LOG_MESSAGE] : undefined;
+  if (typeof logMessage === 'string') fields.logMessage = logMessage;
+  return fields;
+}

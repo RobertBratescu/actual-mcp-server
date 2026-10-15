@@ -98,6 +98,77 @@ const capture = async (fn) => {
     ok(!r.text.includes('SENTINEL-555-Z'), 'sentinel absent from the logs', r.text.slice(0, 300));
   }
 
+  out('\n[#559] a custom validation message that quotes input reaches the client, not the logs');
+  {
+    // transactions_create's refine echoes the split amounts; formatZodError keeps custom text.
+    manager.tools.set(NAME, createTool({
+      name: NAME,
+      description: 'stub',
+      schema: z.object({ amount: z.number().int() }).refine((v) => v.amount !== 717171, { message: 'Expected 717171, got SENTINEL-555-V' }),
+      handler: async () => ({ never: 'reached' }),
+    }));
+    const r = await capture(() => manager.callTool(NAME, { amount: 717171 }));
+    ok(r.error && r.error.message.includes('SENTINEL-555-V'), 'the client receives the custom message', r.error && r.error.message);
+    ok(!r.text.includes('SENTINEL-555-V') && !r.text.includes('717171'), 'neither the message nor the amount is logged', r.text.slice(0, 300));
+    const line = r.text.split('\n').find((l) => l.includes('[TOOL ERROR]'));
+    let rec = null;
+    try { rec = line ? JSON.parse(line).context ?? null : null; } catch { /* asserted below */ }
+    ok(rec && rec.errorClass === 'ZodError' && Array.isArray(rec.issueCodes) && rec.issueCodes.includes('custom'),
+      'the record carries the class and the issue codes', JSON.stringify(rec));
+  }
+
+  // The [TOOL ERROR] record's structured fields, or null.
+  const errorRecord = (text) => {
+    const line = text.split('\n').find((l) => l.includes('[TOOL ERROR]'));
+    try { return line ? JSON.parse(line).context ?? null : null; } catch { return null; }
+  };
+
+  out('\n[#559] an error message that quotes input reaches the client, not the logs');
+  {
+    const { withLogMessage } = await import('../../dist/src/lib/errors.js');
+    stub(async () => {
+      throw withLogMessage(new Error('A category named "SENTINEL-555-E" already exists'), 'category name already exists in this group');
+    });
+    const r = await capture(() => manager.callTool(NAME, {}));
+    ok(r.error && r.error.message.includes('SENTINEL-555-E'), 'the client message still names the input', r.error && r.error.message);
+    ok(!r.text.includes('SENTINEL-555-E'), 'the input is absent from the logs', r.text.slice(0, 300));
+    const rec = errorRecord(r.text);
+    ok(rec && rec.errorClass === 'Error', 'the record carries the error class', JSON.stringify(rec));
+    ok(rec && rec.logMessage === 'category name already exists in this group', 'the record carries the throw site\'s log-safe text');
+  }
+
+  out('\n[#559] an error with no log-safe text is logged by class alone (fails closed)');
+  {
+    stub(async () => { throw new TypeError('upstream said SENTINEL-555-U'); });
+    const r = await capture(() => manager.callTool(NAME, {}));
+    ok(r.error && r.error.message === 'upstream said SENTINEL-555-U', 'the client receives the message unchanged');
+    ok(!r.text.includes('SENTINEL-555-U'), 'the message is absent from the logs', r.text.slice(0, 300));
+    const rec = errorRecord(r.text);
+    ok(rec && rec.tool === NAME && rec.errorClass === 'TypeError' && !('logMessage' in rec),
+      'the record names the tool and the class, with no message', JSON.stringify(rec));
+  }
+
+  out('\n[#559] a typed refusal logs its kind, never the id (which can be a name, #388)');
+  {
+    const { NotFoundRefusal } = await import('../../dist/src/lib/errors.js');
+    stub(async () => { throw new NotFoundRefusal('Category', 'SENTINEL-555-N', 'actual_categories_get'); });
+    const r = await capture(() => manager.callTool(NAME, {}));
+    ok(r.error && r.error.message.includes('SENTINEL-555-N'), 'the client message still names the id');
+    ok(!r.text.includes('SENTINEL-555-N'), 'the id is absent from the logs', r.text.slice(0, 300));
+    const rec = errorRecord(r.text);
+    ok(rec && rec.errorClass === 'NotFoundRefusal' && rec.refusalKind === 'not-found', 'the record carries class and refusal kind', JSON.stringify(rec));
+  }
+
+  out('\n[#559] the real throw sites attach log-safe text');
+  {
+    const tools = await import('../../dist/src/tools/index.js');
+    const r = await capture(() => tools.query_run.call({ query: 'query { SENTINEL-555-Q }' }));
+    ok(r.error && r.error.message.includes('SENTINEL-555-Q'), 'actual_query_run still quotes the query to the client');
+    const { errorLogFields } = await import('../../dist/src/lib/errors.js');
+    const f = r.error ? errorLogFields(r.error) : {};
+    ok(typeof f.logMessage === 'string' && !f.logMessage.includes('SENTINEL'), 'actual_query_run GraphQL rejection carries content-free log text', JSON.stringify(f));
+  }
+
   out('\n[#556] source guard: no log call in src/ serializes a value into its message');
   {
     // A log call that JSON.stringify()s something is how content reached the logs at

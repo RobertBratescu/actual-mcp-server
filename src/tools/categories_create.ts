@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
 import { CommonSchemas } from '../lib/schemas/common.js';
+import { withLogMessage } from '../lib/errors.js';
 
 const InputSchema = z.object({ 
   name: CommonSchemas.name, 
@@ -42,7 +43,11 @@ const tool: ToolDefinition = {
         throw new Error(`Failed to create category: Invalid or missing group_id. Use actual_category_groups_get to get available category groups first.`);
       }
       if (errorMessage.includes('already exists') || errorMessage.includes('duplicate')) {
-        throw new Error(`Failed to create category: A category named "${input.name}" already exists in this group.`);
+        // The client needs the name; the log gets content-free text (#559).
+        throw withLogMessage(
+          new Error(`Failed to create category: A category named "${input.name}" already exists in this group.`),
+          'category name already exists in this group',
+        );
       }
       
       throw new Error(`Failed to create category: ${errorMessage}`);

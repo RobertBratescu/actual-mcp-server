@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import type { ToolDefinition } from '../types/tool.d.js';
 import { formatZodError } from './lib/zod-error-format.js';
+import { errorLogFields } from './lib/errors.js';
 import config from './config.js';
 import { createModuleLogger } from './lib/loggerFactory.js';
 import { resolvePublishedToolNames, unavailableError, type PublishedPolicy, type ToolsetSettings } from './lib/toolsets.js';
@@ -249,17 +250,21 @@ class ActualToolsManager {
       // Format Zod validation errors into one actionable, consistent message (#206).
       // Duck-type on `.issues` so any structurally-compatible ZodError is handled.
       // The failure record mirrors the success one (#556): tool, duration and outcome,
-      // never the arguments. The message text is #559's concern.
+      // never the arguments. It never carries the error MESSAGE either (#559): that text
+      // is for the client and can quote input or upstream content. errorLogFields gives
+      // the class, a refusal's kind, and the throw site's withLogMessage text if any.
       const failure = { tool: name, durationMs: Date.now() - startTime, outcome: 'error' };
       if (err && typeof err === 'object' && 'issues' in err) {
         const formattedMsg = formatZodError(err as z.ZodError, tool.inputSchema);
-        logger.error(`[TOOL ERROR] ${name}: ${formattedMsg}`, failure);
+        // The #206 text is for the client only: a schema's custom refine message can quote
+        // input (transactions_create echoes the split amounts), so the log gets the issue
+        // codes, which come from Zod and never from the arguments.
+        const issueCodes = [...new Set(((err as z.ZodError).issues ?? []).map((i) => String(i?.code)))];
+        logger.error(`[TOOL ERROR] ${name}`, { ...failure, errorClass: 'ZodError', issueCodes });
         throw new Error(formattedMsg);
       }
-      
-      const e = err as Error | { message?: unknown } | undefined;
-      const msg = e && typeof e.message === 'string' ? e.message : String(err);
-      logger.error(`[TOOL ERROR] ${name}: ${msg}`, failure);
+
+      logger.error(`[TOOL ERROR] ${name}`, { ...failure, ...errorLogFields(err) });
       throw err;
     }
   }

@@ -1,5 +1,6 @@
 import { DEFAULT_RETRY_ATTEMPTS, DEFAULT_RETRY_BACKOFF_MS, MAX_RETRY_DELAY_MS } from './constants.js';
 import { ModuleLoggers } from './loggerFactory.js';
+import { errorLogFields } from './errors.js';
 
 const log = ModuleLoggers.RETRY;
 
@@ -98,16 +99,16 @@ export async function retry<T>(
       // (#177). With no classifier, behaviour is unchanged (retry until the
       // attempt budget is exhausted), preserving every existing call site.
       if (isRetryable && !isRetryable(err)) {
-        log.debug('Not retrying non-transient error', { error: (err as Error)?.message });
+        log.debug('Not retrying non-transient error', errorLogFields(err));
         throw err;
       }
       attempt++;
       if (attempt > retries) {
-        log.error(`All retry attempts exhausted after ${retries} tries`, err as Error);
+        log.error(`All retry attempts exhausted after ${retries} tries`, undefined, errorLogFields(err));
         throw err;
       }
       const delay = Math.min(backoffMs * Math.pow(2, attempt - 1), MAX_RETRY_DELAY_MS);
-      log.debug(`Retry attempt ${attempt}/${retries} after ${delay}ms`, { error: (err as Error).message });
+      log.debug(`Retry attempt ${attempt}/${retries} after ${delay}ms`, errorLogFields(err));
       await new Promise(r => setTimeout(r, delay));
     }
   }

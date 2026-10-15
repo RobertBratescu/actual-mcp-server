@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
 import { validateQueryShape } from '../lib/query-validator.js';
+import { errorLogFields, withLogMessage } from '../lib/errors.js';
 
 const InputSchema = z.object({
   query: z.string().min(1).describe('ActualQL query string to execute'),
@@ -32,7 +33,11 @@ Tables:
       
       // Detect and reject GraphQL-like syntax with nested objects
       if (input.query.trim().startsWith('query ') && input.query.includes('{') && input.query.includes('}')) {
-        throw new Error(`GraphQL syntax is not fully supported. Please use SQL instead.\n\nExample: SELECT id, date, amount, payee.name, category.name FROM transactions ORDER BY date DESC LIMIT 5\n\nYour query attempted: ${input.query.substring(0, 100)}...`);
+        // The client sees its own query echoed; the log gets content-free text (#559).
+        throw withLogMessage(
+          new Error(`GraphQL syntax is not fully supported. Please use SQL instead.\n\nExample: SELECT id, date, amount, payee.name, category.name FROM transactions ORDER BY date DESC LIMIT 5\n\nYour query attempted: ${input.query.substring(0, 100)}...`),
+          'GraphQL-style query rejected',
+        );
       }
 
       // Read-only shape gate (#162): reject writes / schema changes / stacked
@@ -44,20 +49,23 @@ Tables:
     } catch (error: any) {
       // Provide helpful error messages
       const errorMessage = error?.message || String(error);
+      // Each rewrap keeps the original's log-safe text (#559), e.g. the GraphQL rejection above.
+      const logSafe = errorLogFields(error).logMessage;
+      const carry = (e: Error) => (logSafe ? withLogMessage(e, logSafe) : e);
       
       // Check if error is about payee_name, category_name, account_name
       if (errorMessage.includes('payee_name') || errorMessage.includes('category_name') || errorMessage.includes('account_name')) {
-        throw new Error(`Field name error: Use dot notation for joins.\n• Use payee.name (NOT payee_name)\n• Use category.name (NOT category_name)\n• Use account.name (NOT account_name)\n\nExample: SELECT id, date, amount, payee.name FROM transactions LIMIT 5\n\nOriginal error: ${errorMessage}`);
+        throw carry(new Error(`Field name error: Use dot notation for joins.\n• Use payee.name (NOT payee_name)\n• Use category.name (NOT category_name)\n• Use account.name (NOT account_name)\n\nExample: SELECT id, date, amount, payee.name FROM transactions LIMIT 5\n\nOriginal error: ${errorMessage}`));
       }
       
       if (errorMessage.includes('does not exist in the schema')) {
-        throw new Error(`Invalid table or field name. Available tables: transactions, accounts, categories, payees, category_groups, schedules, rules. Use dot notation for joins (e.g., category.name). Original error: ${errorMessage}`);
+        throw carry(new Error(`Invalid table or field name. Available tables: transactions, accounts, categories, payees, category_groups, schedules, rules. Use dot notation for joins (e.g., category.name). Original error: ${errorMessage}`));
       } else if (errorMessage.includes('ActualQL query builder not available')) {
-        throw new Error('ActualQL query builder is not available. The Actual Budget API may not be properly initialized.');
+        throw carry(new Error('ActualQL query builder is not available. The Actual Budget API may not be properly initialized.'));
       } else if (errorMessage.includes('parse') || errorMessage.includes('syntax')) {
-        throw new Error(`Query syntax error: ${errorMessage}\n\nRecommended: Use SQL syntax\nExample: SELECT * FROM transactions ORDER BY date DESC LIMIT 5\n\nSee the tool description for the supported WHERE operators and join syntax.`);
+        throw carry(new Error(`Query syntax error: ${errorMessage}\n\nRecommended: Use SQL syntax\nExample: SELECT * FROM transactions ORDER BY date DESC LIMIT 5\n\nSee the tool description for the supported WHERE operators and join syntax.`));
       } else {
-        throw new Error(`Query execution failed: ${errorMessage}`);
+        throw carry(new Error(`Query execution failed: ${errorMessage}`));
       }
     }
   },

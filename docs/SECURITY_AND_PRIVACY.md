@@ -496,17 +496,29 @@ chown $USER:$USER ./actual-data
 - ✅ File permissions (0600)
 - ✅ Log rotation with retention limits
 - ✅ Tool arguments and results are never written to the logs (#556), at any level
-- ⚠️ Error messages that quote user input are tracked separately (#559)
+- ✅ Tool error messages are never written to the logs (#559); the failure record carries the error class
 
 **Tool content is never logged (#556).** Tool arguments and results are the user's budget data:
 amounts, payee names, notes, balances. The server logs a content-free record per call instead,
 `[TOOL RESULT]` with `tool`, `durationMs`, `outcome: "ok"` and `bytes`, and a failed call logs
-`[TOOL ERROR]` with `tool`, `durationMs`, `outcome: "error"` and the error message, never its
-arguments. The rule update path logs the rule id, not its conditions and actions. `callTool` in `src/actualToolsManager.ts` is the
+`[TOOL ERROR]` with `tool`, `durationMs`, `outcome: "error"` and the error class, never its
+arguments or its message. The rule update path logs the rule id, not its conditions and actions. `callTool` in `src/actualToolsManager.ts` is the
 single place content could be logged, so any future opt-in for debugging (#557) belongs there.
 The #220 redaction does not cover this: it masks secret key names and configured secret values,
 not budget content. `tests/unit/tool_content_logging.test.js` guards the rule at `debug` level.
-Error messages are still logged, and some quote user input or stored values; #559 owns that.
+
+**Tool error messages are never logged (#559).** An error's message is for the client and can
+quote what the caller sent (a category name, a query, a rule value) or upstream text we do not
+control, so the `[TOOL ERROR]` record and the `createTool` failure log carry `errorClass`, a
+typed refusal's `refusalKind`, and a `logMessage` only when the throw site attached one with
+`withLogMessage(error, text)` (`src/lib/errors.ts`). That text must be content-free. An error
+without one is logged by class alone, so a new throw site cannot leak by default. The Zod
+validation path logs `errorClass: 'ZodError'` and the Zod issue codes, never the #206
+formatted message, because a schema's custom refine text can quote input. The
+adapter's operation error lines (the write queue, `retry`, category create and the query
+runner) log the same `errorLogFields`, plus a Node system error `code` such as `ECONNRESET`.
+The init and shutdown failure lines still log the upstream message: they carry connection
+errors, not tool input.
 
 **Upgrade note (v0.22.38).** Logs written by earlier versions can contain budget data (tool
 results at `info`, failed-call arguments at `error`). Purge them or let rotation remove them,

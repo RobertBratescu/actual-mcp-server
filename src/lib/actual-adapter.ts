@@ -76,7 +76,7 @@ import observability from '../observability.js';
 import { retry, isRetryableError, isRateLimitError } from './retry.js';
 import { withOpTimeout } from './opTimeout.js';
 import { markInitFailure } from './init-failure.js';
-import { NotFoundRefusal, OutOfRangeRefusal, constraintErrorMsg } from './errors.js';
+import { NotFoundRefusal, OutOfRangeRefusal, constraintErrorMsg, errorLogFields } from './errors.js';
 import { amountOpMismatch } from './schemas/schedule-amount.js';
 import { findMatchingRule, type RuleCondition } from './rule-matching.js';
 import logger from '../logger.js';
@@ -1401,7 +1401,9 @@ async function processWriteQueue() {
             });
             resolve(result);
           } catch (error) {
-            logger.error('[WRITE QUEUE] Operation failed:', error);
+            // Class and log-safe text only (#559): a refusal names the id the caller sent
+            // (which can be a name, #388), and upstream text can quote the written values.
+            logger.error('[WRITE QUEUE] Operation failed', errorLogFields(error));
             // #419: remember an infrastructure-level failure so the batch-end
             // shutdown self-heals (see drainForceFullShutdown above).
             if (_shouldDropPoolOnError(error)) drainForceFullShutdown = true;
@@ -1911,7 +1913,8 @@ export async function createCategory(category: components['schemas']['Category']
       const raw = await withConcurrency(() => retry(() => rawCreateCategory(category) as Promise<string | { id?: string }>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
       return normalizeToId(raw);
     } catch (error) {
-      logger.error('[CREATE CATEGORY] Error creating category:', error);
+      // Upstream's message quotes the category name (#559), so the log gets the class only.
+      logger.error('[CREATE CATEGORY] Error creating category', errorLogFields(error));
       // Re-throw the error with proper context
       if (error instanceof Error) {
         throw error;
@@ -4048,7 +4051,7 @@ export async function runQuery(queryString: string | any): Promise<unknown> {
             } catch (err: any) {
               // Catch errors from the query execution to prevent unhandled rejections
               const msg = err?.message || String(err);
-              logger.error(`[ADAPTER] Query execution error: ${msg}`);
+              logger.error('[ADAPTER] Query execution error', errorLogFields(err)); // #559: msg can quote the query
               if (msg.includes('does not exist in table') || msg.includes('Field') || msg.includes('does not exist')) {
                 throw new Error(`Invalid field in query: ${msg}`);
               }
@@ -4165,7 +4168,7 @@ export async function runQuery(queryString: string | any): Promise<unknown> {
         } catch (err: any) {
           // Catch errors from the query execution to prevent unhandled rejections
           const msg = err?.message || String(err);
-          logger.error(`[ADAPTER] Query execution error: ${msg}`);
+          logger.error('[ADAPTER] Query execution error', errorLogFields(err)); // #559: msg can quote the query
           if (msg.includes('does not exist in table') || msg.includes('Field') || msg.includes('does not exist')) {
             throw new Error(`Invalid field in query: ${msg}`);
           }
@@ -4202,7 +4205,8 @@ export async function runQuery(queryString: string | any): Promise<unknown> {
   } catch (error: any) {
     // Top-level catch to ensure no unhandled rejections escape
     const errorMsg = error?.message || String(error);
-    logger.error(`[ADAPTER] Query execution failed: ${errorMsg}`);
+    // The message can embed the whole query (#559); the client still receives it below.
+    logger.error('[ADAPTER] Query execution failed', errorLogFields(error));
     
     // If the error already contains formatted validation errors with suggestions, preserve them
     if (errorMsg.includes('Invalid SQL query:') && (errorMsg.includes('Available fields:') || errorMsg.includes('Available tables:'))) {

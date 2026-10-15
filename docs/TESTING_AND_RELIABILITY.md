@@ -585,6 +585,12 @@ npm run knip            # blocking since #237: exits nonzero on any dead code
   the arguments and the result, captures every byte written to stdout and stderr, and asserts no
   sentinel appears on success, on a handler failure or on a validation failure, while the
   content-free `[TOOL RESULT]` record (`tool`, `durationMs`, `outcome`, `bytes`) does.
+  Since #559 it also asserts an error MESSAGE (a quoted name, a custom validation message, a
+  refused id) reaches the client but no log line.
+- **Adapter error logging guard** (#559): `tests/unit/adapter_error_logging.test.js` drives the
+  real adapter with raw api stubs at `debug` and asserts a failed category create and a rejected
+  query keep their sentinel out of the write queue, retry and query error lines, which log
+  `errorLogFields` (class, refusal kind, system error code, log-safe text) instead.
 - **Integration cleanup guard** (#519): `tests/unit/batch_uncategorized_cleanup.test.js` drives
   `tests/manual/tests/batch_uncategorized_rules_upsert.js` with a stub client. Since #517 a
   whole-call failure is a thrown tool error, so the module body runs in `try/finally` (no `catch`):

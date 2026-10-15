@@ -338,6 +338,24 @@ test.describe('Docker E2E - ALL 84 TOOLS', () => {
     ).rejects.toThrow(/group_id|required/i);
   });
 
+  test('actual_categories_create - ERROR: a duplicate name in the group is named back to the client (#559)', async ({ mcp, makeCategory, cleanup }) => {
+    // #559 keeps the name OUT of the server log; the client still needs it to recover.
+    const category = await makeCategory();
+    let duplicate: unknown;
+    try {
+      duplicate = await mcp.call('actual_categories_create', { name: category.name, group_id: category.groupId });
+    } catch (error) {
+      expect(String((error as Error).message)).toContain(`A category named "${category.name}" already exists`);
+      return;
+    }
+    // Upstream accepted the duplicate: remove it so the run leaves no residue, then fail.
+    const id = (typeof duplicate === 'string' ? duplicate : (duplicate as any)?.categoryId) as string;
+    if (id) cleanup.add(CLEANUP_ORDER.category, `duplicate category ${category.name}`, async () => {
+      await mcp.call('actual_categories_delete', { id });
+    });
+    throw new Error('a duplicate category name in the same group must be refused');
+  });
+
   test('actual_categories_update - should update category', async ({ mcp, makeCategory }) => {
     const category = await makeCategory();
     const newName = `E2E-Category-Updated-${uniqueSuffix()}`;
