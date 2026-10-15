@@ -120,11 +120,36 @@ logger.info(
  * stdio mode, startup health checks) fall back to the env-default budget
  * (first entry in budgetRegistry).
  *
- * Lifecycle: entries are removed on session close via session_close.ts and
- * implicitly when connectionPool.shutdownConnection runs (switchBudget calls
- * it to drop the stale pool entry bound to the previous syncId).
+ * Lifecycle (#564): entries are released on EVERY session end. The HTTP
+ * transport's teardownSession (idle eviction, the #530 orphan sweep, a client
+ * DELETE) calls clearSessionBudgetState, and actual_session_close does too (it
+ * also covers stdio). connectionPool.shutdownConnection does NOT release them:
+ * switchBudget calls it to drop the stale pool entry and must keep the selection.
+ *
+ * Every write goes through setSessionBudget, which skips a session the transport
+ * layer no longer holds, so a switch or a #189 restore that was in flight across
+ * the teardown cannot re-create the entry after it was released.
  */
 const sessionBudgetState = new Map<string, string>();
+
+/**
+ * #564: is this session still held by its transport? The HTTP server registers
+ * `transports.has`; the default (stdio, unit tests, scripts) treats every session
+ * as live, which is the behaviour before #564.
+ */
+let isSessionLive: (sessionId: string) => boolean = () => true;
+
+export function setSessionLivenessCheck(check: (sessionId: string) => boolean): void {
+  isSessionLive = check;
+}
+
+function setSessionBudget(sessionId: string, key: string): void {
+  if (!isSessionLive(sessionId)) {
+    logger.debug(`[ADAPTER] Session ${sessionId} ended before its budget selection was committed; not recording it`);
+    return;
+  }
+  sessionBudgetState.set(sessionId, key);
+}
 
 function getActiveBudgetConfig(): BudgetConfig {
   // _resolveSessionId is declared below; function declarations hoist so this
@@ -150,7 +175,7 @@ function getActiveBudgetConfig(): BudgetConfig {
       [...budgetRegistry.values()],
     );
     if (restored) {
-      sessionBudgetState.set(sessionId, restored.name.toLowerCase());
+      setSessionBudget(sessionId, restored.name.toLowerCase());
       return restored;
     }
   }
@@ -4549,7 +4574,7 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
 
   if (sameAuth && currentEntry!.syncId === found.syncId) {
     // No-op: already on this exact budget. Keep session map consistent and return.
-    sessionBudgetState.set(sessionId, key);
+    setSessionBudget(sessionId, key);
     setPreferredBudgetSyncId(store?.principal, found.syncId); // #189: persist at commit
 
     logger.info(
@@ -4574,7 +4599,7 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
       });
     }
     connectionPool.updateLoadedSyncId(sessionId, found.syncId);
-    sessionBudgetState.set(sessionId, key);
+    setSessionBudget(sessionId, key);
     setPreferredBudgetSyncId(store?.principal, found.syncId); // #189: persist at commit
 
     logger.info(
@@ -4594,7 +4619,7 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
 
   // Update the per-session active-budget slot. Subsequent getActiveBudgetConfig
   // calls for this session now return the new budget.
-  sessionBudgetState.set(sessionId, key);
+  setSessionBudget(sessionId, key);
   setPreferredBudgetSyncId(store?.principal, found.syncId); // #189: persist at commit
 
   // Materialise a fresh pool entry bound to the new budget. Without this, the
@@ -4643,9 +4668,10 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
 }
 
 /**
- * Clear the per-session budget state for a session. Called from
- * session_close so the per-session map does not accumulate stale entries
- * after a session ends. See #156.
+ * Clear the per-session budget state for a session, so the map does not
+ * accumulate entries for ended sessions (#156). Called from the HTTP
+ * transport's teardownSession on every session end (#564) and from
+ * session_close, which also covers stdio.
  */
 export function clearSessionBudgetState(sessionId: string): void {
   sessionBudgetState.delete(sessionId);

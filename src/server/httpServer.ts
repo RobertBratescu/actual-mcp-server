@@ -14,6 +14,7 @@ import { getLocalIp } from '../utils.js';
 import actualToolsManager from '../actualToolsManager.js';
 import { getConnectionState, connectToActualForSession, shutdownActualForSession, shutdownActual, canAcceptNewSession, isConnectionPoolEnabled } from '../actualConnection.js';
 import { connectionPool, type EvictionReason } from '../lib/ActualConnectionPool.js';
+import { clearSessionBudgetState, setSessionLivenessCheck } from '../lib/actual-adapter.js';
 import observability from '../observability.js';
 import config from '../config.js';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
@@ -323,6 +324,9 @@ export async function startHttpServer(
   // window without a served request, with reason `orphaned`; same teardown. The
   // body is synchronous on purpose: the pool walks its registrations in one pass.
   connectionPool.onSessionEvicted(teardownSession);
+  // #564: a session's selected budget lives as long as its transport. A selection
+  // committed after teardown (a switch in flight across it) is dropped by the adapter.
+  setSessionLivenessCheck((id) => transports.has(id));
   function teardownSession(sessionId: string, reason: EvictionReason): void {
     const transport = transports.get(sessionId);
     if (transport) {
@@ -335,6 +339,7 @@ export async function startHttpServer(
     transports.delete(sessionId);
     sessionInitPromises.delete(sessionId);
     forgetSessionOwner(sessionId);
+    clearSessionBudgetState(sessionId);
     connectionPool.forgetSession(sessionId);
     logger.info(`[SESSION] Transport torn down for ${reason} session: ${sessionId}`);
   }

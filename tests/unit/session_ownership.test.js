@@ -175,8 +175,11 @@ await check('the owner is resolved from the initialize request and recorded befo
 });
 
 await check('the eviction listener forgets the owner', () => {
-  const start = src.indexOf('connectionPool.onSessionEvicted(');
-  assert.ok(src.slice(start, start + 700).includes('forgetSessionOwner(sessionId);'));
+  // Anchored on the listener's body, not a fixed window after the registration (#564 added lines between them).
+  assert.ok(src.includes('connectionPool.onSessionEvicted(teardownSession);'), 'teardownSession is the listener');
+  const start = src.indexOf('function teardownSession(');
+  assert.ok(start > 0, 'teardownSession present');
+  assert.ok(src.slice(start, src.indexOf('\n  }\n', start)).includes('forgetSessionOwner(sessionId);'));
 });
 
 await check('POST session reuse checks ownership before touching the session or handling the request', () => {
