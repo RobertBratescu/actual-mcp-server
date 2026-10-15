@@ -39,6 +39,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   eq(resolveLogConfig({}).level, 'debug', 'dev default level is debug');
   eq(resolveLogConfig({ NODE_ENV: 'production', MCP_BRIDGE_LOG_LEVEL: 'warn' }).level, 'warn', 'explicit level wins in prod');
 
+  out('\n[#558] a .env copied from .env.example keeps the NODE_ENV default level');
+  {
+    const { readFileSync } = await import('node:fs');
+    const dotenv = (await import('dotenv')).default;
+    const example = dotenv.parse(readFileSync(new URL('../../.env.example', import.meta.url)));
+    eq(resolveLogConfig({ ...example, NODE_ENV: 'production' }).level, 'info', '.env.example + NODE_ENV=production -> info');
+    eq(resolveLogConfig({ ...example, NODE_ENV: 'production', MCP_BRIDGE_LOG_LEVEL: 'debug' }).level, 'debug',
+      '.env.example + an explicit MCP_BRIDGE_LOG_LEVEL=debug -> debug');
+    ok(!('MCP_BRIDGE_LOG_LEVEL' in example), '.env.example does not pin MCP_BRIDGE_LOG_LEVEL');
+    eq(resolveLogConfig({ ...example }).level, 'debug', '.env.example without NODE_ENV -> the dev default, debug');
+  }
+
   out('\n[#219] JSON format carries metadata + error stack (the dropped-data fix)');
   {
     const err = new Error('boom');

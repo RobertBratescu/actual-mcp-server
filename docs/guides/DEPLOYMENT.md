@@ -50,6 +50,8 @@ npm run build
 npm run dev -- --http --debug
 ```
 
+The log level follows `NODE_ENV`: `debug` when it is unset (as here), `info` when it is `production`. `.env.example` leaves `MCP_BRIDGE_LOG_LEVEL` unset so a copied `.env` keeps that default; set `MCP_BRIDGE_LOG_LEVEL=debug` explicitly only when you need debug output under `NODE_ENV=production`. See [Upgrading](#upgrading) if your `.env` predates v0.22.39.
+
 The server starts at `http://localhost:3600/http` by default.
 
 **Minimum `.env`:**
@@ -440,6 +442,8 @@ docker rm actual-mcp-server-backend
 docker compose pull
 docker compose --profile production up -d
 ```
+
+**From v0.22.39:** `.env.example` no longer pins `MCP_BRIDGE_LOG_LEVEL=debug`. A `.env` copied from an older example still does, which keeps a `NODE_ENV=production` run (for example `docker run --env-file .env`) at debug level. Remove that line so the production default (`info`) applies.
 
 ---
 

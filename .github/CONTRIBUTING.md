@@ -69,6 +69,8 @@ npm run dev -- --stdio                   # stdio transport (Claude Desktop and s
 npm run dev -- --test-actual-connection  # check the Actual connection and exit
 ```
 
+The log level defaults to `debug` when `NODE_ENV` is not `production`, which is what `npm run dev` runs with. If you run with `NODE_ENV=production` and need debug output, set `MCP_BRIDGE_LOG_LEVEL=debug` in your `.env` explicitly; `.env.example` leaves it unset so a copied file keeps the production default (`info`).
+
 ## 🔄 Making a Change
 
 Branch from **`develop`**, which is where all work lands. `main` only moves when a release is cut.
