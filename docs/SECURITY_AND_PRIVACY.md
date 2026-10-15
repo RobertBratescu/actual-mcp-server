@@ -495,7 +495,22 @@ chown $USER:$USER ./actual-data
 **Protection**:
 - ✅ File permissions (0600)
 - ✅ Log rotation with retention limits
-- ⚠️ Sanitization needed (ongoing improvement)
+- ✅ Tool arguments and results are never written to the logs (#556), at any level
+- ⚠️ Error messages that quote user input are tracked separately (#559)
+
+**Tool content is never logged (#556).** Tool arguments and results are the user's budget data:
+amounts, payee names, notes, balances. The server logs a content-free record per call instead,
+`[TOOL RESULT]` with `tool`, `durationMs`, `outcome: "ok"` and `bytes`, and a failed call logs
+`[TOOL ERROR]` with `tool`, `durationMs`, `outcome: "error"` and the error message, never its
+arguments. The rule update path logs the rule id, not its conditions and actions. `callTool` in `src/actualToolsManager.ts` is the
+single place content could be logged, so any future opt-in for debugging (#557) belongs there.
+The #220 redaction does not cover this: it masks secret key names and configured secret values,
+not budget content. `tests/unit/tool_content_logging.test.js` guards the rule at `debug` level.
+Error messages are still logged, and some quote user input or stored values; #559 owns that.
+
+**Upgrade note (v0.22.38).** Logs written by earlier versions can contain budget data (tool
+results at `info`, failed-call arguments at `error`). Purge them or let rotation remove them,
+including copies held by a log shipper or in Claude Desktop's MCP log files.
 
 **Best Practices**:
 ```bash

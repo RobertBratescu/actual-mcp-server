@@ -3097,7 +3097,8 @@ export async function updateRule(id: string, fields: unknown): Promise<void> {
     const addedRefs = newRuleReferences(rule, existingRule);
     assertRuleReferencesExist(addedRefs, await loadRuleReferenceListings(addedRefs), RULE_REFUSAL_CHANGED);
 
-    logger.debug(`[UPDATE RULE] Updating rule ${id} with merged fields: ${JSON.stringify(rule)}`);
+    // Rule id only: conditions and actions carry payee ids, notes and amounts (#556).
+    logger.debug(`[UPDATE RULE] Updating rule ${id}`);
     
     await withConcurrency(() => retry(() => rawUpdateRule(rule) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
     logger.debug(`[UPDATE RULE] Update completed for rule ${id}`);

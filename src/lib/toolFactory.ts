@@ -108,17 +108,18 @@ export function createTool<TInput = any, TOutput = any>(
       const startTime = Date.now();
       
       try {
+        // No args, input or result in these records (#556): they are budget data.
         // Validate input against schema
-        log.debug(`Validating input for ${name}`, { args });
+        log.debug(`Validating input for ${name}`);
         const input = schema.parse(args || {});
         
         // Execute handler
-        log.debug(`Executing ${name}`, { input });
+        log.debug(`Executing ${name}`);
         const result = await handler(input, meta);
         
         // Log success
         const duration = Date.now() - startTime;
-        log.debug(`${name} completed in ${duration}ms`, { result });
+        log.debug(`${name} completed in ${duration}ms`);
         
         // Track observability
         await observability.incrementToolCall(name);
@@ -127,7 +128,7 @@ export function createTool<TInput = any, TOutput = any>(
       } catch (error) {
         // Log error with details
         const duration = Date.now() - startTime;
-        log.error(`${name} failed after ${duration}ms`, error as Error, { args });
+        log.error(`${name} failed after ${duration}ms`, error as Error);
         
         // Track observability (still increment even on failure)
         await observability.incrementToolCall(name);

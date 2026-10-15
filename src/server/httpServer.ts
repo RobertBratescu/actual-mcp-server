@@ -442,7 +442,8 @@ export async function startHttpServer(
         throw new Error('Tool name must be a string');
       }
       const name = rawName;
-      logger.debug(`[TOOL CALL] ${name} args=${JSON.stringify(args)}`);
+      // Tool name only: arguments are budget data and never reach the logs (#556).
+      logger.debug(`[TOOL CALL] ${name}`);
       // Prefer ActualMCPConnection executor if provided
       if (typeof (mcp as unknown as { executeTool?: Function }).executeTool === 'function') {
         const result = await (mcp as unknown as { executeTool?: (n: string, a?: unknown) => Promise<unknown> }).executeTool!(name, args ?? {});

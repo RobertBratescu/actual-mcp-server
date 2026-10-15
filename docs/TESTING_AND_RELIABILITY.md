@@ -580,6 +580,11 @@ npm run knip            # blocking since #237: exits nonzero on any dead code
   on every enqueue would close the deadlock and silently multiply init/sync cycles. Cases that
   depend on `ACTUAL_OP_TIMEOUT_MS` run in child processes: `config.ts` reads `process.env` once at
   module load, so an in-process env override is silently ignored and the assertion becomes vacuous.
+- **Tool content logging guard** (#556): `tests/unit/tool_content_logging.test.js` drives the
+  real `callTool` and `createTool` path at `MCP_BRIDGE_LOG_LEVEL=debug` with sentinel values in
+  the arguments and the result, captures every byte written to stdout and stderr, and asserts no
+  sentinel appears on success, on a handler failure or on a validation failure, while the
+  content-free `[TOOL RESULT]` record (`tool`, `durationMs`, `outcome`, `bytes`) does.
 - **Integration cleanup guard** (#519): `tests/unit/batch_uncategorized_cleanup.test.js` drives
   `tests/manual/tests/batch_uncategorized_rules_upsert.js` with a stub client. Since #517 a
   whole-call failure is a thrown tool error, so the module body runs in `try/finally` (no `catch`):

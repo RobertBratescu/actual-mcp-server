@@ -118,6 +118,7 @@ export default tool;
 - Dates always `YYYY-MM-DD`
 - UUIDs validated with `UUID_PATTERN` from `src/lib/constants.ts` when needed
 - Error messages are user-facing; make them actionable
+- Never log the tool's arguments or result, at any level (#556): they are the user's budget data. `callTool` already logs a content-free record per call
 - When a lookup returns no results, include a list of available values in the error response (see Negative Test section below)
 
 ---

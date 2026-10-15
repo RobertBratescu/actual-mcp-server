@@ -229,28 +229,37 @@ class ActualToolsManager {
       toolsetLog.warn('Refused a call to an unpublished tool', { tool: name, setting: unavailable.setting });
       throw unavailable;
     }
+    const startTime = Date.now();
     try {
       const result = await tool.call(args);
 
       // Force-serialize/deserialize to ensure result is JSON-safe (no circular refs,
       // Buffers, class instances, etc). Convert undefined -> null so callers always
       // receive a valid JSON value.
-      const safe = result === undefined ? null : JSON.parse(JSON.stringify(result));
+      const json = JSON.stringify(result === undefined ? null : result);
+      const safe = JSON.parse(json);
 
-      logger.info(`[TOOL RESULT] ${name}: ${JSON.stringify(safe)}`);
+      // Content-free by design (#556): tool arguments and results are the user's budget
+      // data and never reach the logs. This record is the one place content COULD be
+      // logged, so an opt-in for debugging (#557) belongs here and nowhere else.
+      // `durationMs`, not `ms`: the logger reserves a top-level `ms` key (src/logger.ts).
+      logger.info('[TOOL RESULT]', { tool: name, durationMs: Date.now() - startTime, outcome: 'ok', bytes: Buffer.byteLength(json, 'utf8') });
       return safe;
     } catch (err: unknown) {
       // Format Zod validation errors into one actionable, consistent message (#206).
       // Duck-type on `.issues` so any structurally-compatible ZodError is handled.
+      // The failure record mirrors the success one (#556): tool, duration and outcome,
+      // never the arguments. The message text is #559's concern.
+      const failure = { tool: name, durationMs: Date.now() - startTime, outcome: 'error' };
       if (err && typeof err === 'object' && 'issues' in err) {
         const formattedMsg = formatZodError(err as z.ZodError, tool.inputSchema);
-        logger.error(`[TOOL ERROR] ${name}: ${formattedMsg}`);
+        logger.error(`[TOOL ERROR] ${name}: ${formattedMsg}`, failure);
         throw new Error(formattedMsg);
       }
       
       const e = err as Error | { message?: unknown } | undefined;
       const msg = e && typeof e.message === 'string' ? e.message : String(err);
-      logger.error(`[TOOL ERROR] ${name}: ${msg}`);
+      logger.error(`[TOOL ERROR] ${name}: ${msg}`, failure);
       throw err;
     }
   }
