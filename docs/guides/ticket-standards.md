@@ -27,9 +27,10 @@ true rather than a matter of discipline.
 
 ## The gate that enforces this
 
-`/gate-ticket <N>` runs 6 core specialist agents (tool-author, qa, release-manager, actual-api,
-security-auditor, architect-review); every agent must score 10/10. An agent whose domain the
-ticket does not touch auto-scores 10 (N/A). Reporters are NOT expected to fill the
+`/gate-ticket <N>` runs deterministic mechanical checks, then one critic agent that returns
+PASS, NEEDS-WORK or BLOCKED, never a numeric score. Project lenses (tool-author, qa,
+release-manager, actual-api, security-auditor, architect-review) join only when a label or the
+ticket body touches their domain, and add pass/fail findings to the same review. Reporters are NOT expected to fill the
 maintainer-rigor sections (acceptance, scenarios, unit_tests, e2e_tests): the gate synthesises
 them from the report, and the fix is proved by reproducing the bug first (red), then re-running
 after the fix (green). See the `implement-ticket` skill.
@@ -49,7 +50,7 @@ ticket makes them evident. Vague restatements of the description do not count.
 
 **Scope:** any ticket with an observable behaviour change. The gate derives this from the
 ticket type and the areas it affects; the author never self-declares it. N/A is permitted only
-where no behaviour delta exists (a pure wireframe, a research spike), and the gate scores that
+where no behaviour delta exists (a pure wireframe, a research spike), and the gate judges that
 N/A claim like any other.
 
 **Quality bar** (each point scorable by the gate):
@@ -122,7 +123,7 @@ additionally requires a green full dual-transport integration run (`bash scripts
 The ticket names the documentation it affects, in the project's documentation tree and its root
 README, or states none with a reason. **Scope is deliberately every work ticket**: this is the
 one rule where always-asked is the point. It stays passable because "none, no user-visible
-surface" is a legitimate answer, and the gate scores that claim like any other N/A, judged
+surface" is a legitimate answer, and the gate judges that claim like any other N/A, judged
 against the ticket's own file list.
 
 ### 8. Implementation and dependency concreteness
