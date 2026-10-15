@@ -59,6 +59,10 @@ const SERVER_URL_OVERRIDE = process.env.MCP_STDIO_SERVER_URL || '';
 export type StdioSession = {
   raw(tool: string, args?: Record<string, unknown>): Promise<any>;
   call(tool: string, args?: Record<string, unknown>): Promise<any>;
+  /** #560: the `instructions` string the server returned from `initialize`. */
+  instructions(): string | undefined;
+  /** #560: the tool names this server publishes, from `tools/list`. */
+  listToolNames(): Promise<string[]>;
   close(): Promise<void>;
 };
 
@@ -142,6 +146,8 @@ export async function openStdioSession(): Promise<StdioSession> {
   return {
     raw,
     call: async (tool, args = {}) => extractResult(await raw(tool, args)),
+    instructions: () => client.getInstructions(),
+    listToolNames: async () => (await client.listTools()).tools.map((t) => t.name),
     close,
   };
 }

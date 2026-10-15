@@ -9,6 +9,7 @@ import { getMcpServerVersion } from './lib/mcp-version.js';
 import path from 'node:path';
 import { z } from 'zod';
 import { isKnownBenignRejection } from './lib/rejection-allowlist.js';
+import { buildServerInstructions } from './lib/serverInstructions.js';
 import { format } from 'node:util';
 
 /*
@@ -249,9 +250,6 @@ export {};
   const useTestMcpClient = args.includes('--test-mcp-client');
 
   const SERVER_DESCRIPTION = 'Bridge MCP server exposing Actual finance API to LibreChat.';
-  const SERVER_INSTRUCTIONS =
-    'Welcome to the Actual MCP server. The tools listed here are only the ones currently confirmed and tested, ' +
-    'but the server can proxy any API call supported by Actual. As we expand coverage, more tools will be officially exposed.';
 
   async function main() {
     // Mutual exclusion — stdio and http are incompatible transports
@@ -280,6 +278,13 @@ export {};
     // The PUBLISHED tools (#483). This is the one name list every tools/list path receives
     // (HTTP SDK handler, the no-session LobeChat path, the expired-session shim, stdio).
     const implementedTools = actualToolsManager.getPublishedToolNames();
+
+    // The initialize `instructions` (#560): built once from the published set and the same
+    // resolved policy, before any transport starts, so no transport can send a different text.
+    const serverInstructionsText = buildServerInstructions(
+      implementedTools,
+      actualToolsManager.getToolPolicy().readOnly,
+    );
 
     // Extract schemas map with tool name → JSON schema
     const toolSchemas: Record<string, unknown> = {};
@@ -379,7 +384,7 @@ export {};
         capabilities,
         implementedTools,
         SERVER_DESCRIPTION,
-        SERVER_INSTRUCTIONS,
+        serverInstructionsText,
         toolSchemas,
         version,
         bindHost,
@@ -412,7 +417,7 @@ export {};
       logger.info(`• OAuth Required:       false`);
       logger.info(`• Capabilities:         ${Object.keys(capabilities).join(', ')}`);
       logger.info(`• Tools:                ${implementedTools.join(', ') || 'none'}`);
-      logger.info(`• Server Instructions:  ${SERVER_INSTRUCTIONS}`);
+      logger.info(`• Server Instructions:  ${serverInstructionsText}`);
       logger.info(`• MCP endpoint (advertised): ${advertisedUrl}`);
       logger.info('---------');
     }
@@ -426,7 +431,7 @@ export {};
         capabilities,
         implementedTools,
         SERVER_DESCRIPTION,
-        SERVER_INSTRUCTIONS,
+        serverInstructionsText,
         toolSchemas,
         version,
         // bind host (ensure server accepts connections on that interface)
@@ -441,7 +446,7 @@ export {};
         capabilities,
         implementedTools,
         SERVER_DESCRIPTION,
-        SERVER_INSTRUCTIONS,
+        serverInstructionsText,
         toolSchemas,
         version,
       );

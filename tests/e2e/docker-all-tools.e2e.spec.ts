@@ -126,6 +126,71 @@ test.describe('Docker E2E - ALL 84 TOOLS', () => {
     expect(again.status()).toBe(404);
   });
 
+  // ==================== INITIALIZE INSTRUCTIONS (#560) ====================
+  // The two legs run in separate Playwright invocations, so "stdio equals HTTP" is proven by
+  // both legs equalling this one literal: buildServerInstructions() for the full registry, not
+  // read-only, which is what this stack runs. A change to the builder text fails BOTH legs here
+  // until this literal is updated, which is the point. The per-preset and read-only texts are
+  // unit-level only (tests/unit/server_instructions.test.js).
+  const FULL_REGISTRY_INSTRUCTIONS =
+    'This server exposes an Actual Budget through MCP tools. ' +
+    'Amounts are integer cents (5000 is 50.00, negative is an outflow) and dates are YYYY-MM-DD strings. ' +
+    'Call actual_get_context first and use the account and category ids it returns, never guessed names. ' +
+    'In actual_query_run, filter on the id columns (account, category, payee) rather than on names; ' +
+    'an empty result can mean a name was wrong.';
+
+  test('initialize - instructions are the full-registry text and name only published tools', async ({ request, stdioSession }) => {
+    let instructions: unknown;
+    let initResult: Record<string, unknown> = {};
+    let toolNames: string[];
+    if (isStdio) {
+      const session = stdioSession as NonNullable<typeof stdioSession>;
+      instructions = session.instructions();
+      toolNames = await session.listToolNames();
+    } else {
+      // A session of its own, ended with DELETE, so the shared one is untouched.
+      const url = `${DEFAULT_MCP_SERVER_URL}${HTTP_PATH}`;
+      const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+      const init = await request.post(url, {
+        data: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize',
+          params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'e2e-instructions-560', version: '1' } } }),
+        headers,
+      });
+      expect(init.status()).toBe(200);
+      const sid = init.headers()['mcp-session-id'];
+      expect(sid).toBeTruthy();
+      try {
+        initResult = (await init.json()).result ?? {};
+        instructions = initResult.instructions;
+        const list = await request.post(url, {
+          data: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+          headers: { ...headers, 'mcp-session-id': sid },
+        });
+        toolNames = ((await list.json())?.result?.tools ?? []).map((t: any) => t.name);
+      } finally {
+        await request.delete(url, { headers: { 'mcp-session-id': sid } });
+      }
+    }
+    expect(instructions).toBe(FULL_REGISTRY_INSTRUCTIONS);
+    // HTTP only: the SDK Client parses the initialize result and exposes no raw object, so a
+    // stdio check here would test an empty placeholder. Unit check 7 and the source scan in
+    // server_instructions.test.js cover the legacy key for the shared Server construction.
+    if (!isStdio) expect('serverInstructions' in initResult).toBe(false);
+    const named = [...FULL_REGISTRY_INSTRUCTIONS.matchAll(/actual_[a-z0-9_]+/g)].map((m) => m[0]);
+    expect(named.length).toBeGreaterThan(0);
+    // Negative: a name the text uses but this session does not publish would be listed here.
+    expect(named.filter((n) => !toolNames.includes(n))).toEqual([]);
+  });
+
+  test('actual_query_run - filtering on a category id, as the instructions recommend, succeeds', async ({ mcp, makeCategory }) => {
+    const category = await makeCategory();
+    const rows = await mcp.call('actual_query_run', {
+      query: `SELECT id FROM transactions WHERE category = '${category.id}' LIMIT 1`,
+    });
+    // A fresh category has no transactions: success is a result, not a thrown refusal.
+    expect(rows).toBeTruthy();
+  });
+
   // ==================== ACCOUNTS (7 tools) ====================
   test('actual_accounts_list - should list all accounts', async ({ mcp }) => {
     const accounts = await mcp.call('actual_accounts_list');

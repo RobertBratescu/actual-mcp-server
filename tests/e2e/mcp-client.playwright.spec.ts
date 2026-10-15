@@ -144,6 +144,9 @@ test.describe('MCP end-to-end (initialize, tools/list, tools/call, SSE)', () => 
     expect(probeResult).toBeTruthy();
     expect(typeof probeResult.capabilities).toBe('object');
     expect(typeof probeResult.capabilities.tools === 'object' || Array.isArray(probeResult.tools)).toBeTruthy();
+    // #560: the spec field, as a plain string, and no longer the non-spec serverInstructions object.
+    expect(typeof probeResult.instructions).toBe('string');
+    expect('serverInstructions' in probeResult).toBe(false);
     console.log('✅ Well-known resource probe successful');
 
     // 2) initialize JSON-RPC with retry

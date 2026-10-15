@@ -94,7 +94,7 @@ export async function startStdioServer(
   capabilities: Record<string, object>,
   implementedTools: string[],
   serverDescription: string,
-  serverInstructions: string,
+  instructions: string,
   toolSchemas: Record<string, unknown>,
   version: string,
 ): Promise<void> {
@@ -124,7 +124,7 @@ export async function startStdioServer(
 
   const server = new Server(
     { name: serverDescription || 'actual-mcp-server', version: version || '0.1.0' },
-    { capabilities, instructions: serverInstructions }
+    { capabilities, instructions }
   );
   attachTransportErrorLogger(server, 'stdio');
 

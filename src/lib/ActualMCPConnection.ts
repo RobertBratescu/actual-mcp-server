@@ -100,7 +100,6 @@ export class ActualMCPConnection extends EventEmitter {
       prompts: false,
       models: false,
       logging: false,
-      serverInstructions: 'This server exposes Actual Finance tools via MCP. You must provide ACTUAL_SERVER_URL, ACTUAL_PASSWORD, and ACTUAL_BUDGET_SYNC_ID as environment variables.'
     };
   }
 

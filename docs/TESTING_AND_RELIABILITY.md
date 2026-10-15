@@ -591,6 +591,12 @@ npm run knip            # blocking since #237: exits nonzero on any dead code
   real adapter with raw api stubs at `debug` and asserts a failed category create and a rejected
   query keep their sentinel out of the write queue, retry and query error lines, which log
   `errorLogFields` (class, refusal kind, system error code, log-safe text) instead.
+- **Server instructions guard** (#560): `tests/unit/server_instructions.test.js` checks that the
+  `initialize` instructions text, built from the published tools, names only published tools in
+  every preset and toolset, in both read-only modes, and stays at most 512 characters. A
+  comment-stripped scan of `src/` forbids the old "proxy any API call" text and any non-spec
+  `serverInstructions` key, and a real HTTP `initialize` returns the passed string unchanged.
+  The full-registry text over both transports is pinned in `docker-all-tools.e2e.spec.ts`.
 - **Integration cleanup guard** (#519): `tests/unit/batch_uncategorized_cleanup.test.js` drives
   `tests/manual/tests/batch_uncategorized_rules_upsert.js` with a stub client. Since #517 a
   whole-call failure is a thrown tool error, so the module body runs in `try/finally` (no `catch`):

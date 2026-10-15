@@ -8,7 +8,8 @@
 //   - GET /.well-known/oauth-protected-resource -> 404 (the regression: was 200 + envelope).
 //     Correct: a static-bearer server has no authorization server to advertise.
 //   - GET /mcp-info (and /mcp-info/http) -> 200, a BARE object (no jsonrpc/result), with
-//     capabilities.tools and a tools array.
+//     capabilities.tools, a tools array, and (#560) instructions as the passed string with
+//     no non-spec serverInstructions key.
 //   - GET /health -> 200 (sanity: the 404 above is "route moved", not "server down").
 // Plus source-wiring guards: the reserved OAuth path is no longer an app.get() info
 // handler, /mcp-info is, and the OIDC-mode RFC 9728 router is untouched (scenario 2).
@@ -70,12 +71,17 @@ try {
   check('GET /mcp-info exposes capabilities.tools',
     body && typeof body.capabilities === 'object' && body.capabilities !== null && 'tools' in body.capabilities);
   check('GET /mcp-info exposes a tools array', Array.isArray(body && body.tools));
+  // #560: instructions is the spec's plain string (the one passed in), never the old object.
+  check('GET /mcp-info instructions is the passed string', body && body.instructions === 'instr');
+  check('GET /mcp-info has no serverInstructions key', body && !('serverInstructions' in body));
 
   // The /http variant mirrors it.
   const infoHttp = await fetch(`${base}/mcp-info/http`);
   const bodyHttp = await infoHttp.json().catch(() => null);
   check(`GET /mcp-info/http -> 200 bare object (got ${infoHttp.status})`,
     infoHttp.status === 200 && bodyHttp && !('jsonrpc' in bodyHttp));
+  check('GET /mcp-info/http instructions is the passed string, no serverInstructions key',
+    bodyHttp && bodyHttp.instructions === 'instr' && !('serverInstructions' in bodyHttp));
 } finally {
   await new Promise((res) => listener.close(res));
   process.removeListener('SIGTERM', cleanup);

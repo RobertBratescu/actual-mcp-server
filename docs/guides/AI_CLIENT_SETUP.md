@@ -59,6 +59,8 @@ mcpServers:
     timeout: 600000  # 10 minutes (budget operations can be slow)
 ```
 
+`serverInstructions: true` makes LibreChat add the server's `initialize` instructions to the system prompt. LibreChat leaves them out by default. The text is short and is built from the tools the server actually publishes, so it tracks `MCP_TOOLSETS`, `MCP_TOOLS` and `MCP_READ_ONLY`: call `actual_get_context` first and use the ids it returns, amounts are integer cents, dates are `YYYY-MM-DD`, and filter `actual_query_run` on id columns.
+
 Then restart LibreChat:
 
 ```bash
@@ -82,6 +84,8 @@ mcpServers:
       Authorization: "Bearer your_token_here"
     serverInstructions: false
 ```
+
+This example sets `serverInstructions: false`, which turns the server's instructions off for that entry. Set it to `true` to get them, as in the example above.
 
 ---
 

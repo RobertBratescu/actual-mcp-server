@@ -69,7 +69,7 @@ export async function startHttpServer(
   capabilities: Record<string, object>,          // was passed by index.ts
   implementedTools: string[],                    // was passed by index.ts
   serverDescription: string,                     // was passed by index.ts
-  serverInstructions: string,                    // was passed by index.ts
+  instructions: string,                          // was passed by index.ts (#560: built once there)
   toolSchemas: Record<string, unknown>,              // was passed by index.ts
   version: string,                               // server version from package.json
   bindHost = 'localhost',                        // #239: interface to bind; forwarded to listen()
@@ -409,14 +409,11 @@ export async function startHttpServer(
       ? capabilities
       : { tools: toolsList.reduce((acc: Record<string, object>, n: string) => { acc[n] = {}; return acc; }, {}) };
 
-  const serverOptions: Record<string, unknown> = {
-      // Provide instructions and capabilities so the SDK initialize response is correct
-      instructions: serverInstructions || "Welcome to the Actual MCP server.",
-      serverInstructions: { instructions: serverInstructions || "Welcome to the Actual MCP server." },
+    // Only the two ServerOptions the MCP spec defines (#560). tools/list is served by the
+    // request handler, not by these options; the SDK ignored the extra keys this once passed.
+    const serverOptions = {
+      instructions,
       capabilities: capabilitiesObj,
-      implementedTools: toolsList,
-      // Include tools array explicitly so initialize result contains tools: string[]
-      tools: toolsList,
     };
 
     const server = new Server(
@@ -965,8 +962,7 @@ export async function startHttpServer(
   const serverIp = process.env.MCP_BRIDGE_PUBLIC_HOST || getLocalIp();
   const mcpInfo = () => ({
     description: serverDescription || "Actual MCP server",
-    instructions: serverInstructions || "Welcome to the Actual MCP server.",
-    serverInstructions: { instructions: serverInstructions || "Welcome to the Actual MCP server." },
+    instructions,
     capabilities: capabilities && Object.keys(capabilities).length ? capabilities : { tools: toolsList.reduce((a: Record<string, object>, n: string) => ({ ...a, [n]: {} }), {}) },
     tools: toolsList,
     advertisedUrl: advertisedUrl || `${scheme}://${serverIp}:${port}${httpPath}`,
