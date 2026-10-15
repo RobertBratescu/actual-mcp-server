@@ -97,6 +97,35 @@ test.describe('Docker E2E - ALL 84 TOOLS', () => {
     expect(typeof data).toBe('object');
   });
 
+  test('HTTP DELETE ends a session; the next call on its id is refused, and an unknown id is 404', async ({ request }) => {
+    // #563: HTTP-only, the method is the transport's (stdio ends a session by closing stdin).
+    // Uses a session of its own: deleting the shared one would break every later test.
+    test.skip(isStdio, 'HTTP DELETE is a transport method; stdio has one implicit session');
+    const url = `${DEFAULT_MCP_SERVER_URL}${HTTP_PATH}`;
+    const init = await request.post(url, {
+      data: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'e2e-delete-563', version: '1' } } }),
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    });
+    const sid = init.headers()['mcp-session-id'];
+    expect(sid).toBeTruthy();
+
+    const del = await request.delete(url, { headers: { 'mcp-session-id': sid } });
+    expect(del.status()).toBe(200);
+
+    const after = await request.post(url, {
+      // tools/call, not tools/list: an expired id on tools/list gets the LobeChat discovery answer.
+      data: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'actual_accounts_list', arguments: {} } }),
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'mcp-session-id': sid },
+    });
+    expect(after.status()).toBe(404);
+    expect((await after.json()).error.code).toBe(-32001);
+
+    // Negative: the same id again is unknown now.
+    const again = await request.delete(url, { headers: { 'mcp-session-id': sid } });
+    expect(again.status()).toBe(404);
+  });
+
   // ==================== ACCOUNTS (7 tools) ====================
   test('actual_accounts_list - should list all accounts', async ({ mcp }) => {
     const accounts = await mcp.call('actual_accounts_list');

@@ -15,6 +15,7 @@ import actualToolsManager from '../actualToolsManager.js';
 import { getConnectionState, connectToActualForSession, shutdownActualForSession, shutdownActual, canAcceptNewSession, isConnectionPoolEnabled } from '../actualConnection.js';
 import { connectionPool, type EvictionReason } from '../lib/ActualConnectionPool.js';
 import { clearSessionBudgetState, setSessionLivenessCheck } from '../lib/actual-adapter.js';
+import { errorLogFields } from '../lib/errors.js';
 import observability from '../observability.js';
 import config from '../config.js';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
@@ -576,6 +577,13 @@ export async function startHttpServer(
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           enableJsonResponse: true,
+          // #563: the SDK awaits this on a valid DELETE, BEFORE it answers 200, so the pool
+          // slot is free by the time the client hears the session ended. It waits for the api
+          // mutex (#392), so another session's call in flight finishes first. Without evict:
+          // the DELETE route tears the session down itself after the 200.
+          onsessionclosed: async (sid: string) => {
+            if (isConnectionPoolEnabled()) await connectionPool.shutdownConnection(sid);
+          },
           onsessioninitialized: async (sid: string) => {
             logger.debug(`Session initialized: ${sid}`);
             // Store the promise before starting initialization
@@ -881,6 +889,68 @@ export async function startHttpServer(
     // one still initializing) keep that session alive.
     connectionPool.touch(sessionId); // Refresh the pool's idle clock (#167)
     await transport.handleRequest(req, res);
+  });
+
+  // #563: DELETE ends the session (MCP spec 2025-11-25, Session Management rule 5).
+  // Same gate, missing-id answer and ownership rule as POST; the SDK then validates
+  // MCP-Protocol-Version, runs onsessionclosed (which frees the pool slot, see the
+  // transport options), answers 200 and closes its transport. Only after a 200 do we
+  // tear the session down ourselves: a 400 for an unsupported version leaves the
+  // session open, as the SDK does. teardownSession is called directly rather than
+  // through the pool's eviction listener because the listener never fires with the
+  // pool disabled or with the entry already dropped (#530), which would leave the
+  // transport, owner and budget selection behind. The pool entry is shut down
+  // WITHOUT evict so the teardown runs once, logged as `closed`.
+  const sessionNotFound = { jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Session not found. Please re-initialize by calling initialize without mcp-session-id header.' } };
+  app.delete(httpPath, async (req: Request, res: Response) => {
+    if (!authenticateRequest(req, res)) {
+      return;
+    }
+    const sessionId = req.headers['mcp-session-id'] as string | undefined;
+    if (!sessionId) {
+      res.status(400).json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'Bad Request: Mcp-Session-Id header is required' } });
+      return;
+    }
+    try {
+      let transport = transports.get(sessionId);
+      const initPromise = transport ? undefined : sessionInitPromises.get(sessionId);
+      if (initPromise) {
+        // A failed init is answered like an unknown id; its #438 record is peek-only and stays.
+        await initPromise.catch(() => undefined);
+        transport = transports.get(sessionId);
+      }
+      // A non-owner gets the unknown-id answer byte for byte (#529), so the reply never
+      // confirms that the id exists.
+      if (!transport || !sessionOwnerMatches(sessionId, resolvePrincipal(req))) {
+        if (transport) logger.warn(`[SESSION] Refused a DELETE for session ${sessionId} from a principal that does not own it`);
+        res.status(404).json(sessionNotFound);
+        return;
+      }
+      const allowedBudgets = (req as Request & { allowedBudgets?: string[] }).allowedBudgets;
+      const requestId = resolveRequestId(req.get('x-correlation-id'));
+      await requestContext.run({ sessionId, requestId, allowedBudgets, principal: resolvePrincipal(req) }, async () => {
+        await transport.handleRequest(req, res);
+      });
+      if (res.statusCode !== 200) return;
+      teardownSession(sessionId, 'closed');
+    } catch (err: unknown) {
+      logger.error(`[SESSION] DELETE for session ${sessionId} failed`, errorLogFields(err));
+      if (!res.headersSent) {
+        res.status(500).json({ jsonrpc: '2.0', id: null, error: { code: -32603, message: 'Internal error. The server logged the cause.' } });
+      }
+    }
+  });
+
+  // #563: every other method on the MCP path gets a JSON-RPC 405 with the Allow header
+  // RFC 9110 15.5.6 requires, instead of Express's HTML 404. HEAD is served by the GET
+  // route; OPTIONS answers 204 with the same Allow list.
+  app.all(httpPath, (req: Request, res: Response) => {
+    res.setHeader('Allow', 'GET, POST, DELETE');
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    res.status(405).json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'Method not allowed.' } });
   });
 
   // Quick GET server-info probe used by our test harness (testMcpClient.ts, the

@@ -139,6 +139,10 @@ const sessionBudgetState = new Map<string, string>();
  */
 let isSessionLive: (sessionId: string) => boolean = () => true;
 
+/** #563: why a queued write whose session ended before it ran was refused. */
+const SESSION_ENDED_BEFORE_WRITE =
+  'The session ended before this write ran, so it was not applied. Start a new session and retry.';
+
 export function setSessionLivenessCheck(check: (sessionId: string) => boolean): void {
   isSessionLive = check;
 }
@@ -1366,6 +1370,17 @@ async function processWriteQueue() {
             ));
             continue;
           }
+          // #563: the session ended (a client DELETE, an eviction) after this write was queued.
+          // Teardown released its budget selection (#564), so its store would now resolve to the
+          // default budget, one the session never chose and its principal may not be allowed.
+          // Refuse instead. Outside the try on purpose, like the fail-fast above: the write never
+          // ran, so it must not reach the pool-drop classification. A plain Error, not a typed
+          // refusal: those mean the caller's input was wrong, and this one is not (gate round 2,
+          // tool-author lens). The check is repeated just before the operation runs, below.
+          if (entry.sessionId && !isSessionLive(entry.sessionId)) {
+            reject(new Error(SESSION_ENDED_BEFORE_WRITE));
+            continue;
+          }
           try {
             // #390 round 2: run each op in the context it was ENQUEUED in.
             //
@@ -1410,6 +1425,17 @@ async function processWriteQueue() {
                 throw waitErr;
               }
               await ensureLoadedBudgetMatchesSession();
+              // #563 round 3: the check above ran before the awaits in this block. Holding the
+              // api lock does not hold teardown off: with the pool disabled nothing in teardown
+              // takes the lock, so the session can end (and its budget selection be released)
+              // while this op waits on an abandoned load, and the precondition would then have
+              // loaded the default budget. Re-check last, immediately before the write, with nothing
+              // awaited in between. Accepted: a session that ended during the wait may cost one
+              // wasted default-budget load, which is harmless because the write is still refused.
+              // The error matches no pool-drop pattern, so the catch below only logs and rejects it.
+              if (entry.sessionId && !isSessionLive(entry.sessionId)) {
+                throw new Error(SESSION_ENDED_BEFORE_WRITE);
+              }
               // #407: an operation may carry its OWN bound. Only a budget import does today, and
               // it needs one: the import is legitimately long, and bounding it at the general
               // operation timeout abandons it while every other session is already waiting on it

@@ -360,6 +360,8 @@ The HTTP transport is stateful: each client connection gets an `mcp-session-id`,
 HTTP 404  {"jsonrpc":"2.0","error":{"code":-32001,"message":"Session not found. Please re-initialize ..."}}
 ```
 
+**A client that ends its session frees its slot at once (#563).** Clients that send HTTP `DELETE` with their `mcp-session-id` when they disconnect (the MCP spec's way to end a session; Gemini is one) release the session immediately, including its connection-pool slot and any budget it selected. Clients that just stop calling are reaped by the idle sweep after `SESSION_IDLE_TIMEOUT_MINUTES`, so on a busy server a client that never sends `DELETE` holds a slot until then.
+
 **A session that was never usable reports why (#438).** The 404 above means the session is simply gone. A different case looks identical to a client but is not: the session was created, its connection to Actual failed to initialise, and the transport was never registered. Since #438 that answer names the cause instead of the generic sentence:
 
 ```

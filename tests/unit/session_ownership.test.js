@@ -200,7 +200,7 @@ await check('a non-owner tools/list gets the same discovery list an unknown id g
 });
 
 await check('GET checks ownership before touching the session or handling the request', () => {
-  const get = src.slice(src.indexOf('app.get(httpPath'), src.indexOf("app.get('/mcp-info'"));
+  const get = src.slice(src.indexOf('app.get(httpPath'), src.indexOf('app.delete(httpPath'));
   const guard = get.indexOf('sessionOwnerMatches(sessionId, resolvePrincipal(req))');
   const touch = get.indexOf('connectionPool.touch(sessionId);');
   const handle = get.indexOf('transport.handleRequest(req, res)');

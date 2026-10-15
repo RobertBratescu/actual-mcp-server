@@ -26,7 +26,8 @@ const DEFAULT_DATA_DIR = path.resolve(os.homedir() || '.', '.actual');
 
 /** Why a session left the pool: `evicted` is the #167 path (idle entry or explicit close),
  *  `orphaned` is #530 (registered id, no entry, one idle window without a served request). */
-export type EvictionReason = 'evicted' | 'orphaned';
+// #563: `closed` is a client-initiated DELETE; httpServer tears the session down itself.
+export type EvictionReason = 'evicted' | 'orphaned' | 'closed';
 
 interface ActualConnection {
   sessionId: string;

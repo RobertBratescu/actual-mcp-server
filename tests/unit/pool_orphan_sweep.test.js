@@ -396,7 +396,7 @@ await check('S-sync the teardown body is synchronous, clears both tables, the ow
 });
 await check('S-unknown both routes check ownership before touching the session', () => {
   const post = src.slice(src.indexOf('app.post(httpPath'), src.indexOf('app.get(httpPath'));
-  const get = src.slice(src.indexOf('app.get(httpPath'), src.indexOf("app.get('/mcp-info'"));
+  const get = src.slice(src.indexOf('app.get(httpPath'), src.indexOf('app.delete(httpPath'));
   for (const [name, route, needle] of [['POST', post, 'connectionPool.beginRequest(sessionId);'], ['GET', get, 'connectionPool.touch(sessionId);']]) {
     const guard = route.indexOf('sessionOwnerMatches(sessionId, resolvePrincipal(req))');
     const touch = route.indexOf(needle);
@@ -406,7 +406,7 @@ await check('S-unknown both routes check ownership before touching the session',
 
 await check('S-inflight POST marks the request in flight and ends it through stream.finished (fires for an already-closed response); GET only touches', () => {
   const post = src.slice(src.indexOf('app.post(httpPath'), src.indexOf('app.get(httpPath'));
-  const get = src.slice(src.indexOf('app.get(httpPath'), src.indexOf("app.get('/mcp-info'"));
+  const get = src.slice(src.indexOf('app.get(httpPath'), src.indexOf('app.delete(httpPath'));
   const begin = post.indexOf('connectionPool.beginRequest(sessionId);');
   // Not res.once('close'): a client that aborted during the init wait closed the response
   // before the listener existed, and the count would never come back down (review round 2).
