@@ -4075,6 +4075,43 @@ export async function resetBudgetHold(month: string): Promise<void> {
     await withConcurrency(() => retry(() => rawResetBudgetHold(month) as Promise<void>, { retries: 2, backoffMs: 200 }));
   }, { preservesListings: PRESERVES_ALL_ENTITY_LISTINGS });
 }
+/**
+ * #561: an empty result whose category.name, payee.name or account.name condition names no
+ * existing entity gains a sibling `hint` naming the value and the query that lists the exact
+ * names. Runs INSIDE runQuery's withActualApi session: raw reads only, never `adapter.*` (the api
+ * lock is not reentrant). Each lookup is a `q()` filter object carrying the main query's own
+ * operator and value, so the value never reaches a query string. A non-empty result, or one with
+ * no name condition, is returned untouched with no lookup; a failed lookup drops the hint rather
+ * than failing a query that succeeded.
+ */
+async function withEmptyResultHint(result: unknown, query: any, q: any): Promise<unknown> {
+  // Upstream answers `{ data }`; a bare array is tolerated the way getFinancialAnalysisSnapshot does.
+  const rows = (r: unknown): unknown[] | undefined =>
+    Array.isArray(r) ? r : Array.isArray((r as { data?: unknown } | null)?.data) ? (r as { data: unknown[] }).data : undefined;
+  const data = rows(result);
+  if (!data || data.length > 0) return result;
+  const lookups = nameConditionLookups(query.serialize?.().filterExpressions ?? []);
+  if (lookups.length === 0) return result;
+  try {
+    const lines: string[] = [];
+    for (const lookup of lookups) {
+      const found = await withConcurrency(() =>
+        rawRunQuery(lookup.inValues
+          ? q(lookup.table).filter({ name: lookup.nameFilter }).select(['name'])
+          : q(lookup.table).filter({ name: lookup.nameFilter }).select(['name']).limit(1)) as Promise<unknown>,
+      );
+      const names = (rows(found) ?? []).map((row) => String((row as { name?: unknown } | null)?.name ?? ''));
+      lines.push(...nameConditionHintLines(lookup, names));
+    }
+    if (lines.length === 0) return result;
+    const hint = lines.join('\n');
+    return Array.isArray(result) ? { data: result, hint } : { ...(result as object), hint };
+  } catch (err) {
+    logger.warn('[ADAPTER] Empty-result name lookup failed; returning the result without a hint', errorLogFields(err));
+    return result;
+  }
+}
+
 export async function runQuery(queryString: string | any): Promise<unknown> {
   try {
     return await withActualApi(async () => {
@@ -4120,6 +4157,7 @@ export async function runQuery(queryString: string | any): Promise<unknown> {
     
     const trimmed = queryString.trim();
     let query;
+    let hasWhereClause = false;   // #561: only a parsed SQL WHERE can carry a name condition
     
     // Check for GraphQL-like query syntax: query Name { table(...) { fields } }
     const graphqlMatch = trimmed.match(/^query\s+\w+\s*\{\s*(\w+)\s*\(([^)]*)\)\s*\{([^}]+)\}\s*\}$/is);
@@ -4195,6 +4233,7 @@ export async function runQuery(queryString: string | any): Promise<unknown> {
         // types and coerce boolean literals to real booleans (#420).
         if (whereClause) {
           query = parseWhereClause(query, whereClause, tableName);
+          hasWhereClause = true;
         }
         
         // Apply ORDER BY
@@ -4213,7 +4252,7 @@ export async function runQuery(queryString: string | any): Promise<unknown> {
     }
     
     try {
-      return await withConcurrency(async () => {
+      const result = await withConcurrency(async () => {
         try {
           return await rawRunQuery(query) as Promise<unknown>;
         } catch (err: any) {
@@ -4226,6 +4265,7 @@ export async function runQuery(queryString: string | any): Promise<unknown> {
           throw err;
         }
       });
+      return hasWhereClause ? await withEmptyResultHint(result, query, q) : result;
     } catch (error: any) {
       // Enhance error messages with helpful context
       const errorMsg = error?.message || String(error);
@@ -4354,7 +4394,7 @@ export async function getFinancialAnalysisSnapshot(params: {
 
 // WHERE-clause translation extracted to ./actual-adapter/query.ts (#166).
 // Imported for internal use by runQuery and re-exported (unit-tested directly).
-import { parseWhereClause } from './actual-adapter/query.js';
+import { parseWhereClause, nameConditionLookups, nameConditionHintLines } from './actual-adapter/query.js';
 export { parseWhereClause };
 export async function runBankSync(accountId?: string): Promise<void> {
   try {

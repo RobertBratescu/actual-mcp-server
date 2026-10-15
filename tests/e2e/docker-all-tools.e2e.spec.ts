@@ -1607,6 +1607,30 @@ test.describe('Docker E2E - ALL 84 TOOLS', () => {
     ).toBeTruthy();
   });
 
+  // #561: an empty result whose name condition matches no entity carries a sibling `hint`; a
+  // real name with no matching rows does not.
+  const queryResult = (r: any): any => r?.result ?? r;
+
+  test('actual_query_run - #561 an unknown category name on an empty result carries a hint', async ({ mcp }) => {
+    const missing = `E2E-NoSuchCategory-${uniqueSuffix()}`;
+    const res = queryResult(await mcp.call('actual_query_run', {
+      query: `SELECT id FROM transactions WHERE category.name = '${missing}'`,
+    }));
+    expect(res.data).toEqual([]);
+    expect(typeof res.hint).toBe('string');
+    expect(res.hint).toContain(missing);
+    expect(res.hint).toContain('SELECT id, name FROM categories');
+  });
+
+  test('actual_query_run - #561 an existing category name with no rows carries no hint', async ({ mcp, makeCategory }) => {
+    const category = await makeCategory();
+    const res = queryResult(await mcp.call('actual_query_run', {
+      query: `SELECT id FROM transactions WHERE category.name = '${category.name}' AND date >= '2099-01-01'`,
+    }));
+    expect(res.data).toEqual([]);
+    expect('hint' in res).toBe(false);
+  });
+
   test('actual_query_run - should execute query with WHERE and ORDER BY', async ({ mcp }) => {
     expect(
       await mcp.call('actual_query_run', {

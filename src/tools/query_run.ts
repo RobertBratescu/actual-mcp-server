@@ -19,6 +19,7 @@ Example: "SELECT id, date, amount, payee.name FROM transactions WHERE amount < 0
 WHERE supports: =, !=, >, >=, <, <=; IN (v1, v2); LIKE / NOT LIKE (case and accent-insensitive, % wildcard, e.g. imported_payee LIKE '%amazon%'); IS NULL / IS NOT NULL; boolean columns as true / false (cleared = false, category.hidden = true); conditions joined with AND. OR, REGEXP, NOT IN and parenthesised groups are not supported and return an error (a query is never silently run unfiltered). Transactions come back in split-INLINE mode: "is_parent = true" returns nothing, use "is_parent = false" to exclude split children.
 
 Joins use dot notation: payee.name, category.name, account.name (NOT payee_name). Amounts are in cents: $100.00 = 10000. Dates are quoted YYYY-MM-DD strings: date >= '2025-01-01'.
+An empty result may carry a "hint" naming a category.name, payee.name or account.name value that matches no entity, with the query that lists the exact names.
 
 Tables:
 - transactions: id, date, amount, notes, cleared, account, payee, category
