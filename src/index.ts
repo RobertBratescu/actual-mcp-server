@@ -119,7 +119,9 @@ const KNOWN_FLAGS = new Set([
   '--http', '--stdio', '--test-actual-connection', '--test-mcp-client',
   '--debug', '--help', '-h', '--version', '-v',
 ]);
-const unknownFlags = argsEarly.filter(a => a.startsWith('-') && !KNOWN_FLAGS.has(a));
+// A bare `--` is the conventional end-of-options marker that `node script.js -- --flag` passes
+// through (the npm `dev` and `test:mcp-client` launchers did, #565); it is not an option.
+const unknownFlags = argsEarly.filter(a => a.startsWith('-') && a !== '--' && !KNOWN_FLAGS.has(a));
 if (unknownFlags.length > 0) {
   console.error(`Unknown option: ${unknownFlags.join(', ')}\nRun \`actual-mcp-server --help\` for usage.`);
   process.exit(1);
@@ -375,8 +377,7 @@ export {};
     // If requested, run the MCP client-side tests now that all variables are ready
     if (useTestMcpClient) {
       logger.info('⚙️  --test-mcp-client specified, starting HTTP server and running client-side MCP tests...');
-      // start server in http mode. Bind all interfaces by default (#239): advertisedUrl
-      // uses the LAN IP (getLocalIp), so the self-test client must be able to reach it.
+      // start server in http mode. Bind all interfaces by default (#239).
       await startHttpServer(
         mcp,
         PORT,
@@ -394,7 +395,18 @@ export {};
       // dynamic import to avoid circular at top
       const { testMcpClient } = await import('./tests/testMcpClient.js');
       try {
-        await testMcpClient(advertisedUrl, PORT, HTTP_PATH);
+        // #565: the self-test talks to the address this process bound, not advertisedUrl. The
+        // advertised LAN IP can be answered by another listener on the same port (a Docker
+        // container publishing it is NATed ahead of local sockets), which turned the run into a
+        // 401 from a different server. A wildcard bind is reached on loopback, '::' on '::1' (an
+        // IPv6-only socket refuses IPv4). The scheme is the listener's, not the advertised one
+        // (MCP_BRIDGE_PUBLIC_SCHEME and MCP_BRIDGE_USE_TLS only change what is advertised).
+        // Under native TLS the advertised host is kept: the certificate names it, not 127.0.0.1.
+        const nativeTls = process.env.MCP_ENABLE_HTTPS === 'true';
+        const loopback = bindHost === '0.0.0.0' ? '127.0.0.1' : bindHost === '::' ? '::1' : bindHost;
+        const selfHost = nativeTls ? advertisedHost : loopback;
+        const selfUrl = `${nativeTls ? 'https' : 'http'}://${selfHost.includes(':') ? `[${selfHost}]` : selfHost}:${PORT}${HTTP_PATH}`;
+        await testMcpClient(selfUrl, HTTP_PATH);
         logger.info('✅ MCP client-side tests passed');
         process.exit(0);
       } catch (err: unknown) {

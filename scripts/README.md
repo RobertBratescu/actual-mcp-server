@@ -50,7 +50,7 @@ bash scripts/deploy-and-test.sh full
 
 | Script | npm script | Purpose |
 |---|---|---|
-| `register-tsconfig-paths.js` | (internal) | Registers `tsconfig.json` path aliases for the compiled `dist/` directory before the server starts. Used by `npm run dev` and `npm run test:mcp-client`. |
+| `register-tsconfig-paths.js` | (internal) | Registers `tsconfig.json` path aliases for the compiled `dist/` directory before the server starts, resolving `dist/` from its own location so it works from any cwd. Used by `npm run dev` and `npm run test:mcp-client`. |
 
 ## Docker / CI bootstrap
 

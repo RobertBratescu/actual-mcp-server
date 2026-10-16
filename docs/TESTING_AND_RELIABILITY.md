@@ -213,7 +213,7 @@ npm run test:e2e:docker
 # Test Actual connection
 npm run dev -- --test-actual-connection
 
-# Test MCP client interaction
+# Test MCP client interaction (needs a live Actual server past initialize, and a free MCP_BRIDGE_PORT)
 npm run test:mcp-client
 ```
 

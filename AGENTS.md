@@ -56,6 +56,7 @@ Follow [docs/NEW_TOOL_CHECKLIST.md](docs/NEW_TOOL_CHECKLIST.md) end to end. New 
 - **Unit** tests are `tests/unit/*.test.js`, plain Node scripts. A new file must be appended to the `test:unit-js` chain in `package.json`; there is no glob, so an unlisted file never runs (a unit test fails the build if one is missing).
 - **E2E** coverage of the tool surface goes in `tests/e2e/docker-all-tools.e2e.spec.ts`, written against the provisioning fixtures in `tests/e2e/fixtures.ts`. It runs over HTTP and stdio. A new spec file is not collected unless a Playwright project matches it.
 - **Integration** modules live in `tests/manual/tests/` and need a live server.
+- **`npm run test:mcp-client`** starts the HTTP server and drives it as an MCP client. Past `initialize` it needs a live Actual server (a real `.env`), and `MCP_BRIDGE_PORT` (default 3600) must be free: another listener on that port answers instead.
 - Include a negative case for every positive one. Details: [docs/TESTING_AND_RELIABILITY.md](docs/TESTING_AND_RELIABILITY.md) and [tests/e2e/README.md](tests/e2e/README.md).
 
 ## Contributing a change

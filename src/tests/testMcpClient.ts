@@ -1,4 +1,4 @@
-export async function testMcpClient(advertisedUrl: string, _port: number, httpPath: string) {
+export async function testMcpClient(serverUrl: string, httpPath: string) {
   // Try builtin fetch or fallback to node-fetch if necessary
   const globalFetch = (globalThis as unknown as { fetch?: unknown }).fetch;
   // Minimal response-like interface used by this test harness
@@ -12,7 +12,7 @@ export async function testMcpClient(advertisedUrl: string, _port: number, httpPa
   const fetchAny = (globalFetch as unknown) ?? (await import('node-fetch')).default;
   const fetchFn: (input: string | URL, init?: RequestInit) => Promise<ResponseLike> = fetchAny as unknown as (input: string | URL, init?: RequestInit) => Promise<ResponseLike>;
 
-  const base = new URL(advertisedUrl);
+  const base = new URL(serverUrl);
   // quick probe endpoint (#286: the server-info probe moved off the reserved
   // /.well-known/oauth-protected-resource OAuth path to the non-reserved /mcp-info,
   // now a bare object; the `result ?? raw` unwrap below tolerates both shapes).
@@ -128,7 +128,12 @@ export async function testMcpClient(advertisedUrl: string, _port: number, httpPa
     headers: listHeaders,
     body: JSON.stringify(listPayload),
   });
-  if (!listRes.ok) throw new Error(`tools/list failed: ${listRes.status}`);
+  if (!listRes.ok) {
+    // #565: a 404 here is usually the session's Actual connection failing (bad credentials or no
+    // reachable server); the body names the cause (#438), so carry it rather than a bare status.
+    const body = await listRes.json().catch(() => undefined);
+    throw new Error(`tools/list failed: ${listRes.status}${body === undefined ? '' : ` ${JSON.stringify(body).slice(0, 300)}`}`);
+  }
   const listJsonRaw = await listRes.json() as unknown;
   const listJsonObj = listJsonRaw && typeof listJsonRaw === 'object' ? (listJsonRaw as Record<string, unknown>) : undefined;
   if (!listJsonObj || !('result' in listJsonObj)) throw new Error('tools/list returned invalid result');

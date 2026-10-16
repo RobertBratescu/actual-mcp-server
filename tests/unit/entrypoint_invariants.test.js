@@ -127,12 +127,13 @@ const ENTRY_ENV = {
 };
 
 /** Spawn the entrypoint and resolve with { code, stderr }, killing it after `killAfterMs`. */
-function runEntry(args, { killAfterMs, onStart, env } = {}) {
+function runEntry(args, { killAfterMs, onStart, env, entry = ENTRY, cwd } = {}) {
   return new Promise((resolve, reject) => {
     // #502: `env` overlays the child env; an `undefined` value REMOVES an inherited variable.
     const childEnv = { ...ENTRY_ENV, ...(args.includes('--stdio') ? { MCP_STDIO_MODE: 'true' } : {}), ...env };
     for (const k of Object.keys(childEnv)) if (childEnv[k] === undefined) delete childEnv[k];
-    const proc = spawn(process.execPath, [ENTRY, ...args], {
+    const proc = spawn(process.execPath, [entry, ...args], {
+      cwd,
       env: childEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -256,6 +257,63 @@ check('#502 U5: NEGATIVE fixtures prove the U4 predicate can fail', () => {
   assert(preLoggerGuardViolations(b.join('\n')).some((x) => /precede/.test(x)), '(b) call after logger import not caught');
   const c = [...good]; c[3] = "    console.log('Debug mode enabled');";
   assert(preLoggerGuardViolations(c.join('\n')).some((x) => /console/.test(x)), '(c) console.log in --debug block not caught');
+});
+
+// ── #565: the npm launcher and the bare `--` it passes ─────────────────────────────
+// `npm run dev` and `npm run test:mcp-client` start through scripts/register-tsconfig-paths.js
+// as `node <launcher> -- <flags>`. The launcher imported `./dist/...`, which a dynamic import
+// resolves against scripts/, and the entrypoint then refused the literal `--`.
+const LAUNCHER = join(ROOT, 'scripts', 'register-tsconfig-paths.js');
+const VERSION_LINE = /^\d+\.\d+\.\d+\S*\n$/;
+
+check('#565 the dev and test:mcp-client scripts start through the launcher', () => {
+  const scripts = JSON.parse(read('package.json')).scripts;
+  for (const name of ['dev', 'test:mcp-client']) {
+    assert(scripts[name].includes('node scripts/register-tsconfig-paths.js'), `${name} no longer uses the launcher: ${scripts[name]}`);
+  }
+});
+
+for (const [label, cwd] of [['the repo root', ROOT], ['another directory', tmpdir()]]) {
+  await checkAsync(`#565 the launcher loads dist/src/index.js when run from ${label}`, async () => {
+    const { code, stdout, stderr } = await runEntry(['--', '--version'], { entry: LAUNCHER, cwd, killAfterMs: 10_000 });
+    assert.strictEqual(code, 0, `expected exit 0, got ${code}. stderr: ${stderr.slice(0, 300)}`);
+    assert.match(stdout, VERSION_LINE, `expected the version on stdout, got ${JSON.stringify(stdout.slice(0, 200))}`);
+  });
+}
+
+await checkAsync('#565 a bare `--` is accepted as the end-of-options marker', async () => {
+  const { code, stdout, stderr } = await runEntry(['--', '--version'], { killAfterMs: 10_000 });
+  assert.strictEqual(code, 0, `expected exit 0, got ${code}. stderr: ${stderr.slice(0, 300)}`);
+  assert.match(stdout, VERSION_LINE);
+});
+
+await checkAsync('#565 NEGATIVE: an unknown flag after `--` is still rejected, naming only it', async () => {
+  const { code, stderr } = await runEntry(['--', '--bogus'], { killAfterMs: 10_000 });
+  assert.strictEqual(code, 1, `expected exit 1, got ${code}`);
+  assert(stderr.includes('Unknown option: --bogus\n'), `stderr must name --bogus alone, got: ${stderr.slice(0, 200)}`);
+});
+
+// The self-test reaches its own server and, when the session's Actual connection fails, says
+// why instead of a bare status. The upstream in ENTRY_ENV is deliberately unreachable.
+await checkAsync('#565 --test-mcp-client reaches its own server and names the session failure', async () => {
+  const { createServer } = await import('net');
+  const port = await new Promise((resolve, reject) => {
+    const s = createServer().once('error', reject).listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
+  });
+  const { code, stderr, stdout } = await runEntry(['--http', '--test-mcp-client'], {
+    killAfterMs: 60_000,
+    // The advertised-scheme variables are set on purpose: the self-test must ignore them.
+    env: {
+      MCP_BRIDGE_PORT: String(port), MCP_ALLOW_UNAUTHENTICATED: 'true', LOG_LEVEL: 'info',
+      MCP_SSE_AUTHORIZATION: undefined, AUTH_PROVIDER: undefined, MCP_ENABLE_HTTPS: undefined, MCP_BRIDGE_BIND_HOST: undefined,
+      MCP_BRIDGE_PUBLIC_SCHEME: 'https', MCP_BRIDGE_USE_TLS: 'true',
+    },
+  });
+  const out = stdout + stderr;
+  assert.strictEqual(code, 1, `expected exit 1 with no Actual server, got ${code}`);
+  assert(out.includes(`probing http://127.0.0.1:${port}/mcp-info`), `the self-test must target loopback: ${out.slice(0, 400)}`);
+  assert(out.includes('Initialize OK'), 'initialize must succeed against our own server');
+  assert(/tools\/list failed: 404 \{.*"code":-32001/.test(out), `the 404 must carry the JSON-RPC cause: ${out.slice(-600)}`);
 });
 
 console.log(`\n[entrypoint-invariants] Results: ${passed} passed, ${failed} failed`);
