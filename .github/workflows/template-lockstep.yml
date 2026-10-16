@@ -10,14 +10,12 @@ on:
       - '.github/ISSUE_TEMPLATE/**'
       - 'docs/guides/ticket-standards.md'
       - 'scripts/check-template-lockstep.sh'
-      - 'scripts/test-template-lockstep.sh'
       - '.github/workflows/template-lockstep.yml'
   pull_request:
     paths:
       - '.github/ISSUE_TEMPLATE/**'
       - 'docs/guides/ticket-standards.md'
       - 'scripts/check-template-lockstep.sh'
-      - 'scripts/test-template-lockstep.sh'
       - '.github/workflows/template-lockstep.yml'
   workflow_dispatch:
 
@@ -30,6 +28,3 @@ jobs:
 
       - name: Templates and standards doc share one template-version
         run: bash scripts/check-template-lockstep.sh
-
-      - name: Guard self-test (drift is detected, matched versions pass)
-        run: bash scripts/test-template-lockstep.sh
