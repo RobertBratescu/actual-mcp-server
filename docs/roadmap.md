@@ -58,10 +58,12 @@ Split from Backlog: the fixes split out of three outside reports, #555 (tool con
 Outcome: done (2026-10-15). All seven tickets shipped: batch 1 (#556, #558, #559) in v0.22.40, batch 2 (#564, #563) in v0.22.42, batch 3 (#560, #561) in v0.22.44, each with full dual-transport evidence. Work that appeared during review went to Backlog as P2 bugs: #565 (dev launcher cannot start the server), #566 (NOT LIKE on a joined field rejected), #567 (an escaped quote never matches with = or LIKE).
 
 ## Phase: Query parser and launcher fixes
-state: open
+state: done
 plan: docs/plans/query-parser-and-launcher-fixes.md
 
 Split from Backlog: three P2 bugs found while implementing the Reporter follow-ups phase. Two are in `actual_query_run` (#567 an escaped apostrophe never matches, with a fix offered by an outside contributor in PR #568; #566 `NOT LIKE` on a joined field is rejected) and one is the dev launcher (#565). Small and independent, released together after one full dual-transport run.
+
+Outcome: done (2026-10-16). All three tickets shipped in v0.22.46 after one full dual-transport run. Two changed shape on the way: #567 also gained a guard refusing quote characters on id columns, a review finding that also affected earlier releases (credited in the release notes along with PR #568, closed as superseded), and the 401 in #565 turned out to be the local-env container answering the advertised LAN address, so the self-test now targets the bound address and the need for a live Actual server past `initialize` is documented. No new tickets: `NOT IN` and `NOT BETWEEN` on a joined field still reach the parser's existing, explicit "not yet supported" error, unchanged from before.
 
 ## Phase: Backlog
 state: backlog
