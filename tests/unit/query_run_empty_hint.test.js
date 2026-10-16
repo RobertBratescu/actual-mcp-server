@@ -179,10 +179,11 @@ await check("5. payee.name = 'O''Brien %': the lookup is a filter object carryin
   const l = lookups[0];
   assert(l.table === 'payees', `table ${l.table}`);
   const mainValue = mainQuery.filterExpressions.find((f) => 'payee.name' in f)['payee.name'];
-  assert(typeof mainValue === 'string' && mainValue.includes('Brien %'), `main filter ${JSON.stringify(mainValue)}`);
+  // #567: `=` decodes the SQL doubling, so the main filter (and the lookup reusing it) is O'Brien.
+  assert(mainValue === "O'Brien %", `main filter ${JSON.stringify(mainValue)}`);
   const lookupValues = l.filterExpressions.filter((f) => 'name' in f).map((f) => f.name);
   assert(lookupValues.length === 1 && lookupValues[0] === mainValue, `lookup filter ${JSON.stringify(l.filterExpressions)}`);
-  assert(typeof r.hint === 'string' && r.hint.includes('Brien %'), JSON.stringify(r));
+  assert(typeof r.hint === 'string' && r.hint.includes("'O'Brien %'"), JSON.stringify(r));
 });
 
 await check("5b. IN ('O''Brien'): the lookup keeps $oneof and the hint shows the unescaped name", async () => {

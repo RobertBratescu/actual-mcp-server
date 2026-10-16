@@ -49,6 +49,16 @@ function _splitInList(valuesStr: string): string[] {
  *  `'McDonald''s'` matches; `'McDonald's'` (a lone quote) does not. */
 const SQL_ESCAPED_SINGLE_QUOTED = /^'(?:[^']|'')*'$/;
 
+// ActualQL's value compiler escapes comparison and LIKE strings for SQLite, so SQL's doubled
+// apostrophe must be decoded first. IN uses a separate path that deliberately preserves it.
+function _stripWhereSqlLiteral(s: string): string {
+  const t = s.trim();
+  if (SQL_ESCAPED_SINGLE_QUOTED.test(t)) {
+    return t.slice(1, -1).replace(/''/g, "'");
+  }
+  return _stripWhereQuotes(s);
+}
+
 function _isSafeInListElement(raw: string): boolean {
   const t = raw.trim();
   // #433: a single-quoted element may now carry DOUBLED internal quotes. That is
@@ -84,11 +94,11 @@ function _coerceInListValue(s: string): string | number {
   return _coerceWhereValue(s);
 }
 
-// Coerce a SQL value literal to a number when it looks numeric, else keep the
-// (unquoted) string. Used for IN lists and comparison operands. Empty stays a
-// string so an empty literal is not silently turned into 0.
+// Coerce a comparison operand (and an IN element with no doubled quote) to a number when it
+// looks numeric, else keep the unquoted string. Empty stays a string so an empty literal is not
+// turned into 0.
 function _coerceWhereValue(s: string): string | number {
-  const v = _stripWhereQuotes(s);
+  const v = _stripWhereSqlLiteral(s);
   if (v === '') return v;
   const n = Number(v);
   return isNaN(n) ? v : n;
@@ -166,7 +176,7 @@ export function parseWhereClause(query: any, whereClause: string, tableName?: st
     const notLikeMatch = trimmedCondition.match(/^([\w.]+)\s+NOT\s+LIKE\s+(.+)$/i);
     if (notLikeMatch) {
       const [, field, valueStr] = notLikeMatch;
-      query = query.filter({ [field]: { $notlike: _stripWhereQuotes(valueStr) } });
+      query = query.filter({ [field]: { $notlike: _stripWhereSqlLiteral(valueStr) } });
       continue;
     }
 
@@ -176,7 +186,7 @@ export function parseWhereClause(query: any, whereClause: string, tableName?: st
     const likeMatch = trimmedCondition.match(/^([\w.]+)\s+LIKE\s+(.+)$/i);
     if (likeMatch) {
       const [, field, valueStr] = likeMatch;
-      query = query.filter({ [field]: { $like: _stripWhereQuotes(valueStr) } });
+      query = query.filter({ [field]: { $like: _stripWhereSqlLiteral(valueStr) } });
       continue;
     }
 
@@ -233,7 +243,27 @@ export function parseWhereClause(query: any, whereClause: string, tableName?: st
       // operators are left to their normal path, where ActualQL will reject them for a boolean as
       // it does today, rather than us inventing an ordering the column does not have.
       const isBool = _isBooleanField(tableName, field) && (actualOp === '$eq' || actualOp === '$ne');
-      const finalValue = isBool ? _coerceBoolean(field, valueStr) : _coerceWhereValue(valueStr);
+      const isText = tableName !== undefined && getFieldType(tableName, field) === 'string';
+      // #567 review: a quoted number stays a string on a text column. Coercing `notes = '123'` to
+      // the number 123 made upstream throw "Can't convert integer to string".
+      const finalValue = isBool
+        ? _coerceBoolean(field, valueStr)
+        : isText ? _stripWhereSqlLiteral(valueStr) : _coerceWhereValue(valueStr);
+      // #567 review: upstream's val() (aql/compiler.ts) re-escapes a value only when it casts to
+      // type `string`. A value compared against an `id` column is inlined as `'${value}'` with NO
+      // escaping, so a quote in it closes the literal: `account = 'x'||(SELECT ...)||'x'` ran the
+      // subquery, past both validators, and decoding `''` made the doubled form do the same. A
+      // quote is therefore allowed only on a column our schema types as `string` (checked against
+      // upstream's schema: every one of them is `string` there, or does not exist and fails to
+      // compile). Any other or unknown type refuses it, which is fail closed: no id, date, number
+      // or boolean legitimately contains a single quote. LIKE and NOT LIKE always cast to string,
+      // so they need no such check.
+      if (!isText && typeof finalValue === 'string' && finalValue.includes("'")) {
+        throw new Error(
+          `Invalid value for column "${field}": a single quote is only allowed in a value ` +
+          `compared against a text column (for example payee.name = 'O''Brien').`,
+        );
+      }
       if (actualOp === '$eq') {
         // Simple equality can use the direct field: value shorthand.
         query = query.filter({ [field]: finalValue });
@@ -284,8 +314,9 @@ export interface NameConditionLookup {
  * `NOT LIKE` are skipped: an unknown name there cannot make the result empty. Each condition is
  * ONE lookup, an IN list included (the ticket allows one extra read per name condition), and the
  * lookup reuses the main query's operator and value, so a `$oneof` element compiles exactly as in
- * the main query (where upstream inlines the doubled-quote form #433 keeps). A numeric-looking
- * literal arrives coerced to a number and is kept as is.
+ * the main query (where upstream inlines the doubled-quote form #433 keeps). The three name
+ * columns are text, so since #567 a numeric-looking `=` value arrives as a string; a number is
+ * still accepted (an IN element can be one) and kept as is.
  */
 export function nameConditionLookups(filterExpressions: unknown[]): NameConditionLookup[] {
   const out: NameConditionLookup[] = [];

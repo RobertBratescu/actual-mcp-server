@@ -105,6 +105,65 @@ check('!= maps to $ne', () => {
   assert.deepStrictEqual(filtersFor('amount != 100'), [{ amount: { $ne: 100 } }]);
 });
 
+check('#567 comparison operators decode SQL-escaped apostrophes', () => {
+  const cases = [
+    ["payee.name = 'O''Brien'", { 'payee.name': "O'Brien" }],
+    ["payee.name != 'O''Brien'", { 'payee.name': { $ne: "O'Brien" } }],
+    ["payee.name > 'O''Brien'", { 'payee.name': { $gt: "O'Brien" } }],
+    ["payee.name >= 'O''Brien'", { 'payee.name': { $gte: "O'Brien" } }],
+    ["payee.name < 'O''Brien'", { 'payee.name': { $lt: "O'Brien" } }],
+    ["payee.name <= 'O''Brien'", { 'payee.name': { $lte: "O'Brien" } }],
+  ];
+  for (const [where, expected] of cases) {
+    assert.deepStrictEqual(filtersForTable(where, 'transactions'), [expected], where);
+  }
+});
+
+check('#567 a quoted number on a text column stays a string', () => {
+  assert.deepStrictEqual(filtersForTable("notes = '123'", 'transactions'), [{ notes: '123' }]);
+  assert.deepStrictEqual(filtersForTable("payee.name = '12345'", 'transactions'), [{ 'payee.name': '12345' }]);
+  // An unquoted number on a numeric column is still a number.
+  assert.deepStrictEqual(filtersForTable('amount = 100', 'transactions'), [{ amount: 100 }]);
+});
+
+check('#567 review: a quote in a value for an id column is refused, doubled or lone', () => {
+  // upstream inlines an id value with NO escaping, so either form would close the literal and run
+  // the subquery (verified against the installed compiler).
+  for (const where of [
+    "account = 'x''||(SELECT group_concat(name) FROM payees)||'''",
+    "account = 'x'||(SELECT group_concat(name) FROM payees)||'x'",
+    "payee = 'abc'''",
+    "category != 'a''b'",
+    "id > 'a''b'",
+    "category.group = 'a''b'",
+  ]) {
+    assert.throws(() => filtersForTable(where, 'transactions'), /single quote is only allowed/, where);
+  }
+});
+
+check('#567 review: a quote with an unknown column type is refused (fail closed)', () => {
+  assert.throws(() => filtersFor("payee.name = 'O''Brien'"), /single quote is only allowed/);
+  assert.throws(() => filtersForTable("bogus = 'a''b'", 'transactions'), /single quote is only allowed/);
+});
+
+check('#567 review: an id value without a quote is unaffected', () => {
+  assert.deepStrictEqual(
+    filtersForTable("account = 'acc-1'", 'transactions'),
+    [{ account: 'acc-1' }],
+  );
+});
+
+check('#567 LIKE and NOT LIKE decode SQL-escaped apostrophes', () => {
+  assert.deepStrictEqual(
+    filtersFor("notes LIKE '%O''Brien%'"),
+    [{ notes: { $like: "%O'Brien%" } }],
+  );
+  assert.deepStrictEqual(
+    filtersFor("notes NOT LIKE '%O''Brien%'"),
+    [{ notes: { $notlike: "%O'Brien%" } }],
+  );
+});
+
 check('IN maps to $oneof with mixed coercion', () => {
   assert.deepStrictEqual(
     filtersFor("category.name IN ('Food', 'Rent')"),
@@ -343,6 +402,10 @@ check('#433: an SQL-ESCAPED apostrophe in an IN list is accepted and passed thro
   // The DOUBLING IS PRESERVED on purpose: upstream supplies the outer quotes, so
   // un-escaping here would produce `'McDonald's'` and reopen the injection.
   assert.ok(oneof[1].includes("McDonald''s"), `doubling must survive to the builder, got ${oneof[1]}`);
+  assert.deepStrictEqual(
+    filtersFor("payee.name IN ('O''Brien')"),
+    [{ 'payee.name': { $oneof: ["O''Brien"] } }],
+  );
 });
 
 check('#433: multiple escaped apostrophes and a mixed list still work', () => {
