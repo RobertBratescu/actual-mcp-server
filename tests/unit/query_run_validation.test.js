@@ -82,6 +82,34 @@ for (const q of VALID_COLUMN) {
   ok(`accepts real column: ${q.slice(40)}`, () => assert.strictEqual(validateQuery(q).valid, true));
 }
 
+// #566: after a joined name (`payee.name`) the scan read the keyword NOT as a column, so a valid
+// `payee.name NOT LIKE` was rejected with `Field "NOT" does not exist`. NOT IN and NOT BETWEEN
+// misread the same way; they now pass validation and reach the parser, which refuses them by name.
+console.log('\n[query-run-validation] #566 NOT after a joined field is a keyword, not a column');
+const fieldErrors = (q) => validateQuery(q).errors.map((e) => e.message);
+for (const join of ['payee.name', 'category.name', 'account.name']) {
+  const q = `SELECT id FROM transactions WHERE ${join} NOT LIKE '%x%'`;
+  ok(`accepts ${join} NOT LIKE`, () => assert.deepStrictEqual(fieldErrors(q), []));
+}
+for (const q of [
+  "SELECT id FROM transactions WHERE payee.name NOT IN ('a')",
+  "SELECT id FROM transactions WHERE payee.name NOT BETWEEN 'a' AND 'b'",
+  "SELECT id FROM transactions WHERE amount < 0 AND payee.name NOT LIKE '%x%' AND notes NOT LIKE '%y%'",
+]) {
+  ok(`no "NOT" field error: ${q.slice(40)}`, () => assert.ok(!fieldErrors(q).some((m) => /"NOT"/i.test(m)), JSON.stringify(fieldErrors(q))));
+}
+ok('a real unknown field before NOT LIKE is still rejected by name', () => {
+  const errs = fieldErrors("SELECT id FROM transactions WHERE bogus NOT LIKE '%x%'");
+  assert.ok(errs.some((m) => m.includes('"bogus"')) && !errs.some((m) => /"NOT"/i.test(m)), JSON.stringify(errs));
+});
+ok('an unknown field after a joined NOT LIKE is still rejected by name', () => {
+  const errs = fieldErrors("SELECT id FROM transactions WHERE payee.name NOT LIKE '%x%' AND bogus = 1");
+  assert.ok(errs.some((m) => m.includes('"bogus"')), JSON.stringify(errs));
+});
+ok('lowercase not after a joined field is handled the same way', () => {
+  assert.deepStrictEqual(fieldErrors("SELECT id FROM transactions WHERE payee.name not like '%x%'"), []);
+});
+
 // #450: the clause terminators had no word boundaries, so the lazy match cut the WHERE clause at
 // the first occurrence of the LETTERS `GROUP`, `ORDER` or `LIMIT` anywhere, including inside a
 // column name, and every field after the cut escaped the allowlist loop entirely. Same defect on

@@ -211,8 +211,13 @@ function extractWhereFields(sql: string): Array<{ field: string; table?: string 
   // comparison operator, but also before IN / LIKE / IS / BETWEEN (with their NOT forms). Before
   // this, `bogus_col IN ('a')`, `bogus_col LIKE '%a%'` and `bogus_col IS NULL` extracted no field
   // and so skipped the allowlist check entirely, while `bogus_col = 'a'` was correctly rejected.
+  // #566: the IN / LIKE / BETWEEN alternative must not capture the keyword NOT as a field. After
+  // `(\w+)\.(\w+)` consumes a joined name such as `payee.name`, the scan resumes at ` NOT LIKE`,
+  // and without the `(?!NOT\s)` lookahead that alternative read `NOT` as a column and rejected a
+  // valid query with `Field "NOT" does not exist`. The lookahead is exact on purpose: it skips only
+  // the word NOT followed by whitespace, so every real column name is still extracted and checked.
   const fieldMatches = whereClause.matchAll(
-    /(\w+)\.(\w+)|(?:^|\s)(\w+)\s*[=<>!]|(?:^|\s)(\w+)\s+(?:NOT\s+)?(?:IN|LIKE|BETWEEN)\b|(?:^|\s)(\w+)\s+IS\b/gi,
+    /(\w+)\.(\w+)|(?:^|\s)(\w+)\s*[=<>!]|(?:^|\s)(?!NOT\s)(\w+)\s+(?:NOT\s+)?(?:IN|LIKE|BETWEEN)\b|(?:^|\s)(\w+)\s+IS\b/gi,
   );
   for (const match of fieldMatches) {
     if (match[1] && match[2]) {

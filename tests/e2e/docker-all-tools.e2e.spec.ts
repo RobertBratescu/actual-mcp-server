@@ -1676,6 +1676,24 @@ test.describe('Docker E2E - ALL 84 TOOLS', () => {
     }
   });
 
+  test('actual_query_run - #566 NOT LIKE on a joined name runs and excludes the match', async ({ mcp, makeAccount, makePayee, makeTransaction }) => {
+    // Before #566 the validator read NOT as a column after payee.name and refused the query.
+    const suffix = uniqueSuffix();
+    const payee = await makePayee({ name: `E2E-Query-NotLike-${suffix}` });
+    const account = await makeAccount();
+    const transaction = await makeTransaction({ account, payee: payee.id });
+    type QueryRow = { id: string };
+    const ids = async (where: string) => {
+      const payload = await mcp.call('actual_query_run', {
+        query: `SELECT id FROM transactions WHERE account = '${account.id}' AND ${where}`,
+      }) as QueryRow[] | { data?: QueryRow[]; result?: { data?: QueryRow[] } } | null;
+      const rows = Array.isArray(payload) ? payload : (payload?.data ?? payload?.result?.data ?? []);
+      return rows.map((row) => row.id);
+    };
+    expect(await ids(`payee.name NOT LIKE '%zzqx-${suffix}%'`)).toContain(transaction.id);
+    expect(await ids(`payee.name NOT LIKE '%NotLike-${suffix}%'`)).not.toContain(transaction.id);
+  });
+
   test('actual_query_run - #420 boolean WHERE: the value actually PARTITIONS the rows', async ({ mcp }) => {
     // Two things this proves that a `toBeTruthy()` on the result could not:
     //   1. The query EXECUTES. Before #420 it threw "Can't convert string/integer to boolean".
