@@ -296,14 +296,12 @@ async function ensureLoadedBudgetMatchesSession(): Promise<void> {
   // per operation, a drain can now change budgets MID-BATCH, and the single trailing api.sync()
   // covers only the last one. Without this, an earlier session's write is applied locally and
   // silently waits for the next load of that budget to propagate, which an ephemeral data dir
-  // would lose entirely. Skipped when the budget lives behind another login: initApiLoggedIn's
-  // upstream shutdown syncs the outgoing budget over the old login anyway, and a second round trip
-  // to that server would hold the process-wide lock for nothing. Accepted cost (#571 review round
-  // 2): upstream shutdown swallows a failed sync, so on that path a failure logs nothing here. The
-  // change is not lost, it stays in the local data dir and syncs at the next load of that budget,
-  // the same outcome as before this skip; only the WARN is gone, and keeping it would double the
-  // stall against an unreachable server.
-  if (loaded && isApiLoggedInTo(loginOf(wanted))) {
+  // would lose entirely. Runs on a cross-login re-selection too, while the old login is still
+  // current: initApiLoggedIn's close deliberately does not sync (see there for the out-of-sync
+  // failure a syncing close caused at session open), so this is the only sync the outgoing budget
+  // gets. It is still a sync of a copy that may be stale if another process wrote the data dir:
+  // #575 tracks that hazard, which every sync here and after writes shares.
+  if (loaded) {
     try {
       await withOpTimeout(() => (api as unknown as { sync: () => Promise<unknown> }).sync(), 'sync');
     } catch (syncErr) {
@@ -334,8 +332,10 @@ function loginOf(budget: BudgetConfig): { serverUrl: string; password: string } 
  * Same server: no new login, so the #127 auth burst #134 removed does not come back.
  *
  * Different or unknown server: log in to the budget's own server with the budget's own password
- * through initApiLoggedIn, which first clears the records and closes (syncing) the outgoing
- * budget over the old login, then download.
+ * through initApiLoggedIn, which first clears the records and closes the outgoing budget WITHOUT
+ * syncing it, then download. The #390 precondition syncs the outgoing budget before calling here;
+ * switchBudget's same-auth fast path does not, so a pending change there syncs at that budget's
+ * next load.
  *
  * Failure: initApiLoggedIn clears the loaded-budget and login records before anything else, so
  * any failure leaves both unknown, the next operation of ANY session re-selects, and the error

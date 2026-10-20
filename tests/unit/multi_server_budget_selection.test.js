@@ -46,7 +46,7 @@ const api = apiMod.default || apiMod;
 let server = null;   // the server the singleton is logged in to
 let live = false;    // upstream's `internal`: set by a successful init, cleared by shutdown
 let loaded = null;   // the budget the singleton holds
-const calls = [];    // ['init', url, password] | ['shutdown'] | ['download', id]
+const calls = [];    // ['init', url, password] | ['close'] | ['shutdown'] | ['download', id]
 
 let holdLogin = null; // case 16: a promise the next login waits on, to make it outlive its bound
 let holdClose = null; // case 17: the same for the next close of an open budget
@@ -60,17 +60,32 @@ api.init = async ({ serverURL, password }) => {
   server = serverURL;
   if (SERVERS[serverURL]?.password !== password) throw new Error(`Authentication failed on ${serverURL}`);
   live = true;
+  return lib;
 };
-// Upstream's shutdown syncs then closes the open budget, and is a no-op with nothing open.
-// Like upstream, it clears its state only once the close has finished (case 17 depends on this).
+// Upstream's init returns its handler object, and `close-budget` closes the open budget WITHOUT
+// syncing it and without dropping the login. Recorded only when a budget is open, so the rows
+// read like the close they assert.
+const lib = {
+  send: async (name) => {
+    if (name !== 'close-budget') throw new Error(`stub lib.send: unexpected ${name}`);
+    if (!loaded) return 'ok';
+    calls.push(['close']);
+    if (holdClose) { const h = holdClose; holdClose = null; await h; calls.push(['closed']); }
+    loaded = null;
+    return 'ok';
+  },
+};
+let traceSync = false; // cases 18 and 20: record syncs in `calls` only there, so other rows stay exact
+api.sync = async () => { if (traceSync) calls.push(['sync']); };
+// Upstream's shutdown syncs then closes the open budget, and is a no-op with nothing open. Only
+// the pool's teardown may call it; a login that did (case 20 catches it) would sync a copy that
+// can be stale against its data dir.
 api.shutdown = async () => {
   if (!live) return;
+  if (traceSync) calls.push(['sync']);
   calls.push(['shutdown']);
-  if (holdClose) { const h = holdClose; holdClose = null; await h; calls.push(['closed']); }
   live = false; server = null; loaded = null;
 };
-let traceSync = false; // case 18: record api.sync in `calls` only there, so the rows above stay exact
-api.sync = async () => { if (traceSync) calls.push(['sync']); };
 api.downloadBudget = async (id) => {
   calls.push(['download', id]);
   if (!SERVERS[server]?.budgets.includes(id)) throw new Error(`budget ${id} not found on ${server}`);
@@ -126,7 +141,7 @@ describe('(2) path 1 default: no stored preference opens on the default budget a
 {
   const mark = calls.length;
   await openSession('sess-bob', 'bob');
-  check(since(mark) === 'shutdown init:http://x:5006:pw-x download:alpha-sync',
+  check(since(mark) === 'close init:http://x:5006:pw-x download:alpha-sync',
     `session open used Alpha's server and budget (got "${since(mark)}")`);
 }
 
@@ -137,13 +152,13 @@ describe('(3) path 2 cross-server: re-selection logs in to the wanted budget\'s 
   const mark = calls.length;
   const got = await accountsIn('sess-alice', 'alice');
   check(got === 'acct-in-gamma-sync', `Alice read Gamma after Bob moved the singleton to X (got ${got})`);
-  check(since(mark) === 'shutdown init:http://y:5006:pw-gamma download:gamma-sync',
+  check(since(mark) === 'close init:http://y:5006:pw-gamma download:gamma-sync',
     `re-selection closed Alpha, logged in to Y with Gamma's password, then downloaded (got "${since(mark)}")`);
 
   const mark2 = calls.length;
   const back = await accountsIn('sess-bob', 'bob');
   check(back === 'acct-in-alpha-sync', `Bob read Alpha after Alice moved the singleton to Y (got ${back})`);
-  check(since(mark2) === 'shutdown init:http://x:5006:pw-x download:alpha-sync',
+  check(since(mark2) === 'close init:http://x:5006:pw-x download:alpha-sync',
     `re-selection closed Gamma, logged in to X with Alpha's password, then downloaded (got "${since(mark2)}")`);
 }
 
@@ -179,7 +194,7 @@ describe('(6) switchBudget fast path: "same auth" as the session entry is not th
     await requestContext.run({ sessionId: 'sess-carol', allowedBudgets: ['*'] }, () => adapter.switchBudget('Alpha'));
   } catch (e) { err = e.message; }
   check(err === null, `the fast-path switch succeeded (got ${err})`);
-  check(since(mark) === 'shutdown init:http://x:5006:pw-x download:alpha-sync',
+  check(since(mark) === 'close init:http://x:5006:pw-x download:alpha-sync',
     `the fast path logged in to X before downloading Alpha (got "${since(mark)}")`);
 }
 
@@ -190,7 +205,9 @@ describe('(7) the wanted server rejects the login: ordinary error, no download, 
   const failMark = calls.length;
   const failedRead = await accountsIn('sess-alice', 'alice');
   check(/Authentication failed/.test(String(failedRead)), `Alice's read failed on the bad login (got ${failedRead})`);
-  check(since(failMark) === 'shutdown init:http://y:5006:pw-gamma',
+  // The trailing shutdown is the legacy cycle's cleanup of the failed operation; the close left
+  // upstream initialised, so it is no longer a no-op, and with nothing open it closes nothing.
+  check(since(failMark) === 'close init:http://y:5006:pw-gamma shutdown',
     `the failed re-selection closed the outgoing budget, tried Y, and downloaded nothing (got "${since(failMark)}")`);
   SERVERS['http://y:5006'].password = 'pw-gamma';
 
@@ -217,7 +234,7 @@ describe('(8) the same sync id on two servers is not a match across servers');
   lastReadServer = null;
   await accountsIn('sess-bob', 'bob');
   check(lastReadServer === 'http://x:5006', `Bob's read ran against X, not Y's copy (got ${lastReadServer})`);
-  check(since(mark) === 'shutdown init:http://x:5006:pw-x download:alpha-sync',
+  check(since(mark) === 'close init:http://x:5006:pw-x download:alpha-sync',
     `the equal sync id did not pass the precondition (got "${since(mark)}")`);
 }
 
@@ -250,8 +267,8 @@ describe('(10) single-server operations add no login: one init at session open, 
   for (let i = 0; i < 3; i++) await accountsIn('sess-erin', 'erin');
   const inits = calls.slice(mark).filter(c => c[0] === 'init');
   check(inits.length === 1, `exactly one init, at session open (got "${since(mark)}")`);
-  check(!since(mark).includes('shutdown', since(mark).indexOf('download')),
-    `no shutdown after the session opened (got "${since(mark)}")`);
+  check(!since(mark).includes('close', since(mark).indexOf('download')),
+    `no close after the session opened (got "${since(mark)}")`);
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +302,7 @@ describe('(13) an unknown login never passes the precondition');
   const mark = calls.length;
   const got = await accountsIn('sess-bob', 'bob');
   check(got === 'acct-in-alpha-sync', `Bob still read Alpha (got ${got})`);
-  check(since(mark) === 'shutdown init:http://x:5006:pw-x download:alpha-sync',
+  check(since(mark) === 'close init:http://x:5006:pw-x download:alpha-sync',
     `the unknown login forced a re-login to X before the read (got "${since(mark)}")`);
 }
 
@@ -324,7 +341,7 @@ describe('(16) a login that times out keeps running: the next operation waits fo
 // ---------------------------------------------------------------------------
 describe('(17) a close that times out keeps running: the next operation waits for it to settle');
 {
-  // Upstream's shutdown clears the open budget only when close-budget finishes. Alice's close of
+  // Upstream's close-budget clears the open budget only when it finishes. Alice's close of
   // Bob's Alpha times out and lands AFTER her call has failed; had Bob's re-login and download run
   // first, that late close would close the budget Bob just loaded, under his read. The abandoned
   // close is registered with the #393 registry in every deployment, so Bob's lock acquisition
@@ -354,20 +371,21 @@ describe('(17) a close that times out keeps running: the next operation waits fo
 }
 
 // ---------------------------------------------------------------------------
-describe('(18) a cross-server re-selection syncs the outgoing budget once, not twice');
+describe('(18) a cross-server re-selection syncs the outgoing budget over the old login, then closes it');
 {
-  // The login's upstream shutdown syncs the outgoing budget over the old login, so an explicit
-  // sync before it is a second round trip to that server under the process-wide lock.
+  // The login's close does not sync (case 20), so the precondition's explicit sync is the only
+  // one the outgoing budget gets, and it must run BEFORE the login moves to the other server.
   await accountsIn('sess-bob', 'bob'); // singleton on X with Alpha
   traceSync = true;
   try {
     const mark = calls.length;
     const got = await accountsIn('sess-alice', 'alice'); // Gamma, on Y
     check(got === 'acct-in-gamma-sync', `Alice read Gamma (got ${got})`);
-    check(since(mark).startsWith('shutdown init:http://y:5006'),
-      `the re-selection went straight to the shutdown that syncs anyway (got "${since(mark)}")`);
+    // startsWith: the read's own trailing sync of Gamma follows the download.
+    check(since(mark).startsWith('sync close init:http://y:5006:pw-gamma download:gamma-sync'),
+      `the outgoing budget synced once, on X, before the close and the login to Y (got "${since(mark)}")`);
 
-    // Negative: a same-server re-selection has no shutdown, so its explicit sync must stay.
+    // Negative: a same-server re-selection has no close or login, and still syncs first.
     setPreferredBudgetSyncId('heidi', 'beta-sync');
     await openSession('sess-heidi', 'heidi');
     await accountsIn('sess-heidi', 'heidi'); // Beta, on X
@@ -402,6 +420,31 @@ describe('(19) a session opened on an override never inherits the default encryp
       'a default-budget session keeps ACTUAL_BUDGET_PASSWORD');
   } finally {
     delete process.env.ACTUAL_BUDGET_PASSWORD;
+  }
+}
+
+// ---------------------------------------------------------------------------
+describe('(20) a session open closes the loaded budget without syncing it');
+{
+  // A copy loaded in memory can be stale against its own data dir: another process (the stdio
+  // #270 regression runs one in the same container) wrote that budget meanwhile. Syncing it fails
+  // "out-of-sync" and leaves the local copy permanently unopenable, which is what the v0.22.48
+  // full run hit when the login closed through upstream's shutdown (sync, then close).
+  await accountsIn('sess-bob', 'bob'); // singleton on X with Alpha
+  setPreferredBudgetSyncId('kim', 'gamma-sync');
+  traceSync = true;
+  try {
+    const mark = calls.length;
+    await openSession('sess-kim', 'kim');
+    check(since(mark) === 'close init:http://y:5006:pw-gamma download:gamma-sync',
+      `the open closed Alpha without a sync, then logged in to Y (got "${since(mark)}")`);
+
+    // Negative: the pool's own teardown still goes through upstream's shutdown, which syncs.
+    const mark2 = calls.length;
+    await api.shutdown();
+    check(since(mark2) === 'sync shutdown', `the stub's shutdown records its sync (got "${since(mark2)}")`);
+  } finally {
+    traceSync = false;
   }
 }
 

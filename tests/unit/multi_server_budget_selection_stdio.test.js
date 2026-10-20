@@ -40,6 +40,16 @@ api.init = async ({ serverURL, password }) => {
   server = serverURL;
   if (SERVERS[serverURL]?.password !== password) throw new Error(`Authentication failed on ${serverURL}`);
   live = true;
+  return lib;
+};
+// Upstream's init returns its handler object; `close-budget` closes the open budget WITHOUT
+// syncing it and keeps the login (#571 follow-up: a syncing close broke a stale local copy).
+const lib = {
+  send: async (name) => {
+    if (name !== 'close-budget') throw new Error(`stub lib.send: unexpected ${name}`);
+    if (loaded) { calls.push(['close']); loaded = null; }
+    return 'ok';
+  },
 };
 api.shutdown = async () => { if (!live) return; calls.push(['shutdown']); live = false; server = null; loaded = null; };
 api.sync = async () => {};
@@ -80,7 +90,7 @@ describe('(2) after a switch to a budget on another server, the next call logs i
   const got = await accounts();
   check(got === 'acct-in-gamma-sync' && lastReadServer === 'http://y:5006',
     `read Gamma on Y (got ${got} on ${lastReadServer})`);
-  check(since(mark) === 'shutdown init:http://y:5006:pw-gamma download:gamma-sync',
+  check(since(mark) === 'close init:http://y:5006:pw-gamma download:gamma-sync',
     `closed Alpha, logged in to Y with Gamma's password, downloaded Gamma (got "${since(mark)}")`);
 }
 

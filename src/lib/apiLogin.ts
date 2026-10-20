@@ -2,6 +2,13 @@ import api from '@actual-app/api';
 import { withOpTimeout } from './opTimeout.js';
 import { setApiLogin, setLoadedBudgetSyncId, registerBudgetLoad, loginsSpanServers, type ApiLogin } from './apiState.js';
 
+type UpstreamLib = { send: (name: string, args?: unknown) => Promise<unknown> };
+
+// Upstream's `init` returns its module-level handler object, the same one every time. Upstream
+// exports no other way to reach `close-budget`. Nothing can be open before the first init, which
+// is when this is still unset.
+let upstreamLib: UpstreamLib | null = null;
+
 /**
  * #571: the ONLY place in src/ that calls `api.init`.
  *
@@ -17,11 +24,20 @@ import { setApiLogin, setLoadedBudgetSyncId, registerBudgetLoad, loginsSpanServe
  *     server before it signs in, so a login that throws or times out leaves the client on a
  *     server with nothing proven; clearing first means nothing trusts it afterwards, and the
  *     next operation of any session re-selects.
- *  2. close any open budget with upstream `api.shutdown`, which syncs it first over the OLD
- *     login. Upstream's init does NOT close an open budget, so without this a pending change of
- *     the outgoing budget would next try to sync against the new server. A no-op when nothing is
- *     open (the legacy per-operation cycle has already shut down). Not the pool's shutdown
- *     helpers: those drop pool entries, and the other sessions' entries are still valid.
+ *  2. close any open budget with upstream's `close-budget`, which does NOT sync. Upstream's init
+ *     does not close an open budget, so without this a pending change of the outgoing budget
+ *     would next try to sync against the new server. Harmless when nothing is open (the legacy
+ *     per-operation cycle has already shut down). Never `api.shutdown`: it syncs before it
+ *     closes, and syncing an in-memory copy that is stale against its own data dir (another
+ *     process wrote that budget) fails "out-of-sync" and leaves the local copy permanently
+ *     unopenable; every session open on that budget then fails until the copy is deleted. The
+ *     v0.22.48 full run hit exactly that after the stdio #270 regression, which v0.22.47 survived
+ *     because its session open only ran upstream's download, whose own close does not sync
+ *     either. This removes only the session-open trigger: the adapter precondition still syncs
+ *     the outgoing budget before re-selecting (so a pending change is not lost), and that sync
+ *     carries the same stale-copy hazard when a second process writes the data dir (#575).
+ *     Anything still pending syncs at that budget's next load. Not the pool's shutdown helpers: those drop pool entries, and the other sessions'
+ *     entries are still valid.
  *  3. log in, then record the login.
  *
  * Bounded by the op timeout (#270). Callers that retry on the auth rate limit wrap this whole
@@ -35,24 +51,27 @@ import { setApiLogin, setLoadedBudgetSyncId, registerBudgetLoad, loginsSpanServe
  * (`loginsSpanServers`): there it could move the client to another server under the next
  * operation, while with one login it lands on the only server there is, and registering it would
  * replace #270's per-request recovery with a fail-closed wait on every operation. The close
- * has no such exemption: its upstream sync talks to the server, so a close that stalls makes every
- * session wait, bounded and failing closed, in a one-login deployment too (the accepted #393
- * trade-off; making the close and login abortable is #574). Their late
+ * has no such exemption: it waits on upstream's spreadsheet and services (not on running handlers), so a close
+ * that stalls makes every session wait, bounded and failing closed, in a one-login deployment
+ * too (the accepted #393 trade-off; making the close and login abortable is #574). Their late
  * success records nothing (the records were cleared in step 1 and `setApiLogin` is only reached by
  * a caller still waiting), so the next operation logs in again.
  */
 export async function initApiLoggedIn(dataDir: string, login: ApiLogin, label: string): Promise<void> {
   setApiLogin(null);
   setLoadedBudgetSyncId(null);
-  const closing = (api as unknown as { shutdown: () => Promise<void> }).shutdown();
-  registerBudgetLoad(closing);
-  await withOpTimeout(() => closing, `${label} (close outgoing budget)`);
+  if (upstreamLib) {
+    const closing = upstreamLib.send('close-budget');
+    registerBudgetLoad(closing);
+    await withOpTimeout(() => closing, `${label} (close outgoing budget)`);
+  }
   const loggingIn = api.init({
     dataDir,
     serverURL: login.serverUrl,
     password: login.password,
-  });
+  }) as Promise<UpstreamLib | undefined>;
   if (loginsSpanServers()) registerBudgetLoad(loggingIn);
-  await withOpTimeout(() => loggingIn, label);
+  const lib = await withOpTimeout(() => loggingIn, label);
+  if (lib && typeof lib.send === 'function') upstreamLib = lib;
   setApiLogin(login);
 }
