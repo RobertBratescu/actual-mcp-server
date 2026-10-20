@@ -1,10 +1,12 @@
 // Tests for the hardened static-Bearer auth path in httpServer.ts (#157).
 //
 // Two-pronged check:
-//   1. Behavioural: replicate the comparison logic from authenticateRequest
-//      and assert it returns the right answer in constant time. Verifies the
-//      Buffer-length short-circuit and timingSafeEqual usage are correct.
-//   2. Static-analysis log-leak guard: parse the source file and forbid any
+//   1. Behavioural: the REAL matcher (src/auth/static-tokens.ts matchBearerToken, which
+//      authenticateRequest calls since #572) accepts the legacy MCP_SSE_AUTHORIZATION
+//      token and rejects a mismatch, a different length and an empty token without
+//      throwing. Until #572 these rows exercised a copy of the comparison kept in this
+//      file, which could not notice the production code changing.
+//   2. Static-analysis log-leak guard: parse the source files and forbid any
 //      debug-log line that includes token contents (the strings that were
 //      logged before this fix landed). Removing the fix would re-introduce
 //      one of these strings; the test catches it before merge.
@@ -12,11 +14,11 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { timingSafeEqual } from 'node:crypto';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const sourcePath = resolve(here, '../../src/server/httpServer.ts');
-const source = readFileSync(sourcePath, 'utf8');
+const source = readFileSync(resolve(here, '../../src/server/httpServer.ts'), 'utf8');
+const matcherSource = readFileSync(resolve(here, '../../src/auth/static-tokens.ts'), 'utf8');
+const { resolveStaticTokens, matchBearerToken, LEGACY_STATIC_PRINCIPAL } = await import('../../dist/src/auth/static-tokens.js');
 
 console.log('Running #157 bearer-auth hardening tests');
 
@@ -31,54 +33,54 @@ function bad(msg) {
   failed++;
 }
 
-// Replica of the production comparison logic. Must stay in lockstep with
-// src/server/httpServer.ts:authenticateRequest. If the production code
-// changes, this replica should change identically.
-function compareToken(token, expected) {
-  const a = Buffer.from(token, 'utf8');
-  const b = Buffer.from(expected, 'utf8');
-  return a.length === b.length && timingSafeEqual(a, b);
+// The entries startHttpServer builds when only MCP_SSE_AUTHORIZATION is set.
+const LEGACY = 'MCP-BEARER-LOCAL-a9f3k2p8q7x1m4n6';
+const entries = resolveStaticTokens(undefined, {}, [], LEGACY);
+function compareToken(token) {
+  return matchBearerToken(token, entries)?.principal === LEGACY_STATIC_PRINCIPAL;
 }
 
-// 1. Matching tokens: returns true.
+// 1. Matching token: accepted as the legacy principal.
 {
-  const result = compareToken('MCP-BEARER-LOCAL-a9f3k2p8q7x1m4n6', 'MCP-BEARER-LOCAL-a9f3k2p8q7x1m4n6');
-  if (result === true) ok('matching tokens return true');
-  else bad(`matching tokens should return true, got ${result}`);
+  const result = compareToken(LEGACY);
+  if (result === true) ok('matching token returns the legacy principal');
+  else bad(`matching token should match, got ${result}`);
 }
 
-// 2. Mismatched tokens, same length: returns false.
+// 2. Mismatched token, same length: rejected.
 {
-  const result = compareToken('MCP-BEARER-LOCAL-a9f3k2p8q7x1m4n6', 'MCP-BEARER-LOCAL-XXXXXXXXXXXXXXXXX');
-  if (result === false) ok('same-length mismatched tokens return false');
-  else bad(`same-length mismatch should return false, got ${result}`);
+  const result = compareToken('MCP-BEARER-LOCAL-XXXXXXXXXXXXXXXXX');
+  if (result === false) ok('same-length mismatched token is rejected');
+  else bad(`same-length mismatch should be rejected, got ${result}`);
 }
 
-// 3. Different lengths: returns false without calling timingSafeEqual (which would throw).
+// 3. Different length (a strict prefix, and a longer one): rejected without throwing.
 {
   let threw = false;
+  let result;
   try {
-    compareToken('short', 'this-is-a-much-longer-string');
+    result = compareToken(LEGACY.slice(0, -1)) || compareToken(LEGACY + 'x');
   } catch (e) {
     threw = true;
   }
-  const result = compareToken('short', 'this-is-a-much-longer-string');
-  if (result === false && !threw) ok('different-length tokens return false without throwing');
-  else bad(`different-length tokens should return false without throwing, got ${result}, threw=${threw}`);
+  if (result === false && !threw) ok('different-length tokens are rejected without throwing');
+  else bad(`different-length tokens should be rejected without throwing, got ${result}, threw=${threw}`);
 }
 
-// 4. Empty token vs configured non-empty: returns false.
+// 4. Empty token: rejected.
 {
-  const result = compareToken('', 'something');
-  if (result === false) ok('empty token returns false');
-  else bad(`empty token should return false, got ${result}`);
+  const result = compareToken('');
+  if (result === false) ok('empty token is rejected');
+  else bad(`empty token should be rejected, got ${result}`);
 }
 
-// 5. Empty configured vs non-empty token: returns false.
+// 5. Nothing configured: no entries, so nothing matches (authenticateRequest is not
+//    reached at all then; this pins that an empty entry list cannot match).
 {
-  const result = compareToken('something', '');
-  if (result === false) ok('empty configured returns false');
-  else bad(`empty configured should return false, got ${result}`);
+  const none = resolveStaticTokens(undefined, {}, [], undefined);
+  const result = none.length === 0 && matchBearerToken('something', none) === undefined;
+  if (result === true) ok('no configured token: no entries and no match');
+  else bad(`no configured token should give no entries and no match, got ${none.length} entries`);
 }
 
 // 6. Log-leak guard: forbid debug-log strings that previously dumped token contents.
@@ -92,18 +94,27 @@ const FORBIDDEN_LOG_PATTERNS = [
   'Token hex dump',
 ];
 for (const pat of FORBIDDEN_LOG_PATTERNS) {
-  if (source.includes(pat)) {
+  if (source.includes(pat) || matcherSource.includes(pat)) {
     bad(`Source file contains forbidden debug-log pattern: "${pat}". See #157.`);
   } else {
     ok(`source does not log "${pat}"`);
   }
 }
+// #572: the matcher module holds the tokens' digests; it must not log at all.
+if (/^import .*(logger|loggerFactory)/m.test(matcherSource) || /console\.\w+\(/.test(matcherSource)) bad('src/auth/static-tokens.ts must not log (it handles tokens). See #572.');
+else ok('src/auth/static-tokens.ts does not log');
 
-// 7. Source uses timingSafeEqual.
-if (source.includes('timingSafeEqual')) {
-  ok('source uses timingSafeEqual');
+// 7. The comparison is constant-time: since #572 it lives in src/auth/static-tokens.ts,
+//    and authenticateRequest must go through that matcher rather than compare itself.
+if (/import \{[^}]*timingSafeEqual[^}]*\} from 'node:crypto'/.test(matcherSource)) {
+  ok('the matcher uses timingSafeEqual');
 } else {
-  bad('source must use timingSafeEqual; not found');
+  bad('src/auth/static-tokens.ts must use timingSafeEqual; not found');
+}
+if (/matchBearerToken\(/.test(source)) {
+  ok('httpServer.ts authenticates through matchBearerToken');
+} else {
+  bad('httpServer.ts must call matchBearerToken; not found');
 }
 
 // 8. Source no longer uses bare !== for the auth comparison.

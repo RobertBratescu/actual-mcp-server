@@ -73,6 +73,7 @@ Legend for **Source**: `schema` = validated Zod key; `raw` = read directly from
 |----------|------|---------|----------|--------|--------|--------------|-------|
 | `AUTH_PROVIDER` | enum | `none` | No | no | schema | config | `none` (static Bearer) or `oidc` |
 | `MCP_SSE_AUTHORIZATION` | string | (none) | No | yes | schema | config | Static Bearer token (raw token, not `Bearer ...`) |
+| `MCP_STATIC_TOKENS` | JSON string | (none) | No | no | schema | config (shape), `httpServer.ts` (resolved before bind) | #572 several static Bearer tokens: `{"<principal>":{"tokenEnv":"MCP_TOKEN_<X>","budgets":["<registry name>", ...]}}`. Principal: letters, digits, `. _ -`, at most 64, not `static-bearer`. Shape errors refuse to start on both transports; an unset, short (under 32), non-RFC 6750 or duplicate token and an unknown budget name refuse HTTP startup. Refused with `AUTH_PROVIDER=oidc`. Blank means off |
 | `MCP_ALLOW_UNAUTHENTICATED` | bool string | `false` | No | no | schema | `index.ts` | #242 opt-out: only `true` lets HTTP serve unauthenticated on a non-loopback bind; otherwise the server refuses to start |
 | `OIDC_ISSUER` | url string | (none) | If oidc | no | schema | config | OIDC issuer URL |
 | `OIDC_ALLOW_INSECURE_ISSUER` | bool string | `false` | No | no | schema | `httpServer.ts` | #244 opt-out: allow an http OIDC issuer on a trusted network (default refuses non-https/non-loopback issuers at startup) |
@@ -128,6 +129,17 @@ but does not fail; renumber consecutively to load them.
 | `BUDGET_n_SERVER_URL` | url string | falls back to `ACTUAL_SERVER_URL` | No | no | dynamic | Server URL for budget n |
 | `BUDGET_n_PASSWORD` | string | falls back to `ACTUAL_PASSWORD` | No | yes | dynamic | Password for budget n |
 | `BUDGET_n_ENCRYPTION_PASSWORD` | string | (none) | No | yes | dynamic | E2E password for budget n |
+
+## Static token values (dynamic family, #572)
+
+`MCP_TOKEN_*` variables hold the tokens `MCP_STATIC_TOKENS` names through each
+principal's `tokenEnv`. They are not declared individually: a `tokenEnv` outside this
+family is refused, so a principal cannot point at `ACTUAL_PASSWORD` or another secret,
+and the logger scrubs every value of the family from log output.
+
+| Variable | Type | Default | Required | Secret | Source | Notes |
+|----------|------|---------|----------|--------|--------|-------|
+| `MCP_TOKEN_*` | string | (none) | When named by `MCP_STATIC_TOKENS` | yes | dynamic | At least 32 characters, unique across all principals and `MCP_SSE_AUTHORIZATION`, RFC 6750 characters only |
 
 ## OS / runtime and internal
 

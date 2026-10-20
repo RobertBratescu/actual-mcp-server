@@ -6,7 +6,7 @@ This guide covers connecting AI clients (LibreChat, LobeChat, or any MCP-compati
 
 - Actual MCP Server running and reachable (see [Deployment Guide](DEPLOYMENT.md))
 - Health check passing: `curl http://localhost:3600/health`
-- A Bearer token configured if auth is enabled (`MCP_SSE_AUTHORIZATION`)
+- A Bearer token configured if auth is enabled (`MCP_SSE_AUTHORIZATION`, or one token per client with `MCP_STATIC_TOKENS`, see [One token per client](#one-token-per-client-mcp_static_tokens))
 
 ---
 
@@ -197,6 +197,34 @@ url: "https://actual-mcp.yourdomain.com/http"
 ```bash
 sudo certbot certonly --standalone -d actual-mcp.yourdomain.com
 ```
+
+---
+
+## One token per client (`MCP_STATIC_TOKENS`)
+
+Without OIDC, `MCP_SSE_AUTHORIZATION` gives every client the same identity, so two
+assistants share one budget preference and can reach every budget. `MCP_STATIC_TOKENS`
+(#572) gives each client its own token, bound to its own principal and budget allow-list:
+
+```bash
+MCP_STATIC_TOKENS={"household":{"tokenEnv":"MCP_TOKEN_HOUSEHOLD","budgets":["Home"]},"business":{"tokenEnv":"MCP_TOKEN_BUSINESS","budgets":["Company"]}}
+MCP_TOKEN_HOUSEHOLD=<openssl rand -hex 16>
+MCP_TOKEN_BUSINESS=<openssl rand -hex 16>
+```
+
+Budget names are the `BUDGET_n_NAME` (or default budget) names. Each token must be at
+least 32 characters and unique; the server refuses to start otherwise, naming the
+variable but never the value.
+
+In LobeChat, add the plugin once per assistant with that assistant's token in
+**Authorization** (`Bearer <MCP_TOKEN_HOUSEHOLD value>` for the household assistant,
+`Bearer <MCP_TOKEN_BUSINESS value>` for the business one). Each assistant then sees and
+switches only its own budgets; asking for another one is refused. LibreChat works the
+same way with one `mcpServers` entry per token.
+
+The server still holds one open budget at a time, so two clients working on different
+budgets take turns (each switch reloads the budget). See
+[SECURITY_AND_PRIVACY.md](../SECURITY_AND_PRIVACY.md) for the full model.
 
 ---
 
@@ -397,7 +425,7 @@ To make that recovery cheap (a quiet re-initialize, not a full sign-in), keep th
 | Symptom | Likely Cause | Fix |
 |---|---|---|
 | Tools don't load in AI client | Wrong URL or network | Verify `curl` health check works from the AI container |
-| `401 Unauthorized` | Token mismatch | Check `MCP_SSE_AUTHORIZATION` matches `Authorization: Bearer <token>` |
+| `401 Unauthorized` | Token mismatch | Check the client's `Authorization: Bearer <token>` matches `MCP_SSE_AUTHORIZATION` or the `MCP_TOKEN_*` variable its `MCP_STATIC_TOKENS` entry names (a changed token needs a server restart) |
 | Timeout errors | Slow Actual Budget server | Increase `timeout` in client config (default: 10 min) |
 | `connection refused` | MCP server not running | Check `docker logs actual-mcp-server-backend` |
 | 0 tools loaded | Wrong transport type | Ensure `type: "streamable-http"` (not `"sse"`) in LibreChat config |

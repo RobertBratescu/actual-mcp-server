@@ -174,7 +174,10 @@ let upstreamImports = 0;
   describe('Case 9: the refusal does not name the out-of-ACL default budget');
   {
     warnCalls.length = 0;
-    const err = await caught(() => inSession('s9', ['beta-sync'], async () => getBudgets()));
+    // #572: a list naming a registry budget now STARTS on it (first permitted
+    // fallback), so ['beta-sync'] would run on Beta. A list naming no registry
+    // budget keeps the default active, which is what this refusal row needs.
+    const err = await caught(() => inSession('s9', ['other-sync'], async () => getBudgets()));
     check(!!err && /^Budget ACL:/.test(err.message), 'refused with a Budget ACL error', err ? err.message : 'no error thrown');
     check(!!err && !err.message.includes('Alpha') && !err.message.includes('alpha-sync'), 'message names neither Alpha nor alpha-sync', err?.message);
     check(warnCalls.some(c => c.includes('acl_denied') && c.includes('alpha-sync')), 'the log still records the attempted budget');

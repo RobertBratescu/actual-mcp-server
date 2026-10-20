@@ -544,6 +544,10 @@ AUTH_PROVIDER=none                       # 'none' or 'oidc'
 # Static Bearer token (AUTH_PROVIDER=none)
 MCP_SSE_AUTHORIZATION=your_bearer_token  # Bearer token (optional)
 
+# Several static tokens, one per client, each with its own principal and budgets (#572)
+MCP_STATIC_TOKENS={"alice":{"tokenEnv":"MCP_TOKEN_ALICE","budgets":["Home"]}}
+MCP_TOKEN_ALICE=at_least_32_chars        # The token value; each MCP_TOKEN_* value is redacted from logs
+
 # OIDC / JWT authentication (AUTH_PROVIDER=oidc)
 OIDC_ISSUER=https://sso.yourdomain.com   # OIDC issuer URL
 OIDC_RESOURCE=https://actual-mcp.example.com/http   # This server's public MCP URL (RFC 9728 identifier, expected 'aud'; #461)
@@ -592,6 +596,7 @@ export const configSchema = z.object({
   MCP_BRIDGE_PORT: z.string().default('3600'),
   MCP_TRANSPORT_MODE: z.enum(['--http']).default('--http'),
   MCP_SSE_AUTHORIZATION: z.string().optional(),
+  MCP_STATIC_TOKENS: z.string().optional(),   // shape-checked by parseStaticTokensConfig (#572)
   AUTH_PROVIDER: z.enum(['none', 'oidc']).default('none'),
   OIDC_ISSUER: z.string().optional(),
   OIDC_RESOURCE: z.string().optional(),

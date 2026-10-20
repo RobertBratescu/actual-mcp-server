@@ -364,7 +364,9 @@ export {};
     if (useHttp || useTestMcpClient) {
       const decision = enforceHttpAuthPosture({
         bindHost,
-        hasStaticToken: !!process.env.MCP_SSE_AUTHORIZATION,
+        // #572: MCP_STATIC_TOKENS is authentication too. A set-but-unresolvable value
+        // still counts here: startHttpServer refuses it before binding.
+        hasStaticToken: !!process.env.MCP_SSE_AUTHORIZATION || !!process.env.MCP_STATIC_TOKENS?.trim(),
         oidcEnabled: process.env.AUTH_PROVIDER === 'oidc',
         allowUnauthenticated: process.env.MCP_ALLOW_UNAUTHENTICATED === 'true',
       });
@@ -469,7 +471,10 @@ export {};
   }
 
   main().catch((err) => {
-    logger.error('Failed to start Actual MCP bridge:', err.message || String(err));
+    // #572: the message goes INTO the format string. Passed as a second argument, winston
+    // treats a string as metadata and printed it one character per line ("0": "M", ...),
+    // so an operator never saw why startup failed.
+    logger.error(`Failed to start Actual MCP bridge: ${err?.message || String(err)}`);
     process.exit(1);
   });
 })();

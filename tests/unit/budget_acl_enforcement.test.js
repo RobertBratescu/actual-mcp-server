@@ -12,6 +12,8 @@
 //   7. switchBudget: OIDC + disallowed target: refuses, logs warn.
 //   8. switchBudget: exact-match enforcement, "Pro" does NOT match "Production".
 //   9. switchBudget: releases the pool entry before mutating the session map.
+//  15. #572: an OIDC session with no switch and no stored preference starts on the FIRST
+//      PERMITTED budget in registry order, not registry entry 0 (which it may not see).
 
 import { strict as assert } from 'node:assert';
 
@@ -60,6 +62,7 @@ async function setupLoggerCapture() {
     _setSkipApiInitForTests,
     _setApiInitializedForTests,
     clearSessionBudgetState,
+    _getActiveBudgetConfigForTests,
   } = adapterMod;
 
   const { connectionPool } = await import('../../dist/src/lib/ActualConnectionPool.js');
@@ -490,6 +493,26 @@ async function setupLoggerCapture() {
     else bad('encryptionPassword leaked into log output');
 
     clearSessionBudgetState('sess-no-leak');
+  }
+
+  // Case 15 (#572): the fallback for a restricted principal is its first permitted budget.
+  // Before #572 an OIDC user permitted only "Personal" landed on the default budget and
+  // every call was refused until they switched; now the session starts on "Personal".
+  describe('Case 15: #572 OIDC restricted fallback is the first permitted budget');
+  {
+    config.AUTH_PROVIDER = 'oidc';
+    const ctx = { sessionId: 'sess-572-fallback', allowedBudgets: ['sync-personal', 'sync-prod'] };
+    const active = await requestContext.run(ctx, async () => _getActiveBudgetConfigForTests());
+    if (active.syncId === 'sync-prod') pass('fallback is the first permitted budget in REGISTRY order (Production before Personal)');
+    else bad('fallback should be sync-prod', active.syncId);
+    const ran = await requestContext.run(ctx, async () => withActualApi(async () => 'ok-572'));
+    if (ran === 'ok-572') pass('a call with no prior switch runs instead of being refused');
+    else bad('call with no prior switch should run', String(ran));
+    const open = await requestContext.run({ sessionId: 'sess-572-open', allowedBudgets: ['*'] }, async () => _getActiveBudgetConfigForTests());
+    if (open.syncId === 'sync-default') pass('a wildcard principal still falls back to registry entry 0');
+    else bad('wildcard fallback should be sync-default', open.syncId);
+    clearSessionBudgetState('sess-572-fallback');
+    clearSessionBudgetState('sess-572-open');
   }
 
   console.log(`\n#156 + #172 results: ${passed} passed, ${failed} failed`);

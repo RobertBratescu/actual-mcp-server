@@ -11,6 +11,8 @@ process.env.MCP_SSE_AUTHORIZATION = 'LIVE-SECRET-TOKEN-XYZ123';
 process.env.ACTUAL_SERVER_URL = process.env.ACTUAL_SERVER_URL ?? 'http://localhost:5006';
 process.env.ACTUAL_BUDGET_SYNC_ID = process.env.ACTUAL_BUDGET_SYNC_ID ?? '00000000-0000-0000-0000-000000000000';
 process.env.ACTUAL_PASSWORD = 'hunter2-secret';
+// #572: a static Bearer token is named by MCP_STATIC_TOKENS; its variable ends in no secret suffix.
+process.env.MCP_TOKEN_ALICE = 'alice-static-token-572-aaaaaaaaaaaaaaaaaa';
 
 let failures = 0;
 const out = (s) => process.stderr.write(s + '\n');
@@ -51,6 +53,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     ok(vals.includes('longpassword') && vals.includes('tok-abcdef') && vals.includes('eightchr'), 'collects secret-named values >= 8 chars');
     ok(!vals.includes('short7x'), 'skips too-short (<8) secret value');
     ok(!vals.includes('notsecret-but-long'), 'skips non-secret-named var');
+    ok(collectSecretValues({ MCP_TOKEN_ALICE: 'x'.repeat(40) }).includes('x'.repeat(40)), '#572 collects an MCP_TOKEN_* value (prefix family, no suffix)');
   }
 
   out('\n[#220] redactRecord must NOT mutate a live nested object (copy-on-write)');
@@ -99,11 +102,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       // `password` is a TOP-LEVEL sensitive key: it exercises the after-splat top-level
       // redaction path end to end (the exact path the splat-ordering bug lived in).
       logger.info('inbound', { headers: { authorization: 'Bearer abc.def' }, password: 'topsecretpw', note: 'LIVE-SECRET-TOKEN-XYZ123 here', accountId: 'a1' });
+      logger.info('static token alice-static-token-572-aaaaaaaaaaaaaaaaaa in a message');
     });
     await sleep(20);
     ok(!stderr.includes('Bearer abc.def'), 'raw Authorization value (nested key) not in output', stderr.slice(0, 200));
     ok(!stderr.includes('topsecretpw'), 'top-level sensitive KEY masked end-to-end through the live pipeline');
     ok(!stderr.includes('LIVE-SECRET-TOKEN-XYZ123'), 'configured secret value scrubbed from output');
+    ok(!stderr.includes('alice-static-token-572'), '#572 an MCP_TOKEN_* value is scrubbed from a message end to end');
     ok(stderr.includes('[REDACTED]'), 'redaction marker present');
     ok(stderr.includes('a1'), 'benign field preserved');
     eq(stdout, '', 'stdout stays empty (stdio framing)');

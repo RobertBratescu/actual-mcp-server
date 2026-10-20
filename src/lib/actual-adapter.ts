@@ -188,7 +188,22 @@ function getActiveBudgetConfig(): BudgetConfig {
       return restored;
     }
   }
-  return [...budgetRegistry.values()][0];
+  // #572: a restricted caller with no selection and no restorable preference starts
+  // on its FIRST PERMITTED budget in registry order (the order the operator controls
+  // and every listing shows; the allow-list is a set), instead of the default it may
+  // not use. Keyed on the list, not the auth mode, so OIDC restricted principals get
+  // it too: before #572 one whose list excluded the default got "Budget ACL:" on every
+  // call until it switched. With no restricting list, or nothing in the registry
+  // permitted, this is the default as before, and _enforceBudgetAcl then refuses.
+  // Not memoised: a later switch writes the session slot, and the next call
+  // recomputes the same answer from the same list.
+  const values = [...budgetRegistry.values()];
+  const restricting = restrictingAllowList(store?.allowedBudgets);
+  if (restricting) {
+    const permitted = values.find((b) => restricting.includes(b.syncId));
+    if (permitted) return permitted;
+  }
+  return values[0];
 }
 
 /**
@@ -563,10 +578,12 @@ function _enforceBudgetAcl(toolName?: string): void {
   const sessionId = requestContext.getStore()?.sessionId;
 
   // Trusted-local short-circuit. stdio and startup health checks run with no
-  // sessionId; in non-OIDC modes those are by-construction trusted (single
-  // user, local process). The ACL only applies when an authenticated multi-
-  // user context is in play (AUTH_PROVIDER === 'oidc').
-  if (!sessionId && config.AUTH_PROVIDER !== 'oidc') {
+  // sessionId AND no allow-list; in non-OIDC modes those are by-construction
+  // trusted (single user, local process). #572: a context that CARRIES a list is
+  // always checked, session or not (the HTTP initialize context has a static
+  // principal's list and no session id yet), so the skip is narrowed to contexts
+  // with no list.
+  if (!sessionId && config.AUTH_PROVIDER !== 'oidc' && !requestContext.getStore()?.allowedBudgets) {
     return;
   }
 
@@ -630,6 +647,18 @@ function restrictedAllowedBudgets(toolName?: string): string[] | undefined {
     );
   }
 
+  return restrictingAllowList(allowedBudgets);
+}
+
+/**
+ * #572: THE allow-list predicate: the list when it restricts, else `undefined`.
+ * A missing list and a list containing `"*"` do not restrict. An EMPTY list does:
+ * it is the deny state (budget-acl.ts gives [] to a principal with no access), so it
+ * restricts to nothing. Used by restrictedAllowedBudgets, switchBudget, the
+ * _enforceBudgetAcl skip and the getActiveBudgetConfig fallback, so they cannot
+ * disagree about who is restricted.
+ */
+function restrictingAllowList(allowedBudgets: string[] | undefined): string[] | undefined {
   if (!allowedBudgets || allowedBudgets.includes('*')) return undefined;
   return allowedBudgets;
 }
@@ -4696,8 +4725,11 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
   if (!found) throw notFound();
 
   // ACL enforcement: the target budget must be in this session's allowedBudgets.
-  // OIDC mode: explicit ACL required. Non-OIDC: short-circuit allow (single-user).
-  if (config.AUTH_PROVIDER === 'oidc') {
+  // OIDC mode: explicit ACL required. #572: any mode whose request carries a
+  // restricting list (MCP_STATIC_TOKENS) is checked against it too; with no list
+  // outside OIDC the caller is unrestricted (legacy bearer, no-auth).
+  const restricting = restrictingAllowList(allowedBudgets);
+  if (config.AUTH_PROVIDER === 'oidc' || restricting) {
     if (!allowedBudgets) {
       logger.warn(
         JSON.stringify({
@@ -4712,7 +4744,7 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
         `Budget ACL: cannot switch to "${found.name}". No allowedBudgets in request context.`,
       );
     }
-    if (!allowedBudgets.includes('*') && !allowedBudgets.includes(found.syncId)) {
+    if (restricting && !restricting.includes(found.syncId)) {
       logger.warn(
         JSON.stringify({
           event: 'acl_denied',

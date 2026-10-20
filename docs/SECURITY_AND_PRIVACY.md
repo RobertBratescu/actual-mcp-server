@@ -57,7 +57,68 @@ MCP_SSE_AUTHORIZATION=your_generated_token
 **Security Properties**:
 - ✅ Stateless - no session management needed
 - ✅ Works with HTTP transport
-- ✅ Can be rotated without restarting server
+- Rotating the token means changing the value and restarting the server: configuration is read once at startup
+
+#### 1b. **One static token per client (`MCP_STATIC_TOKENS`, #572)**
+
+**Status**: ✅ Implemented (`AUTH_PROVIDER=none`). Proposed and first implemented by
+@jospaquim in PR #569.
+
+With `MCP_SSE_AUTHORIZATION` alone every caller is the one principal `static-bearer`: all
+clients share one budget preference and can see every budget. `MCP_STATIC_TOKENS` gives
+each client its own token, and each token its own principal and budget allow-list, without
+running an identity provider:
+
+```bash
+MCP_STATIC_TOKENS={"alice":{"tokenEnv":"MCP_TOKEN_ALICE","budgets":["Home"]},"bob":{"tokenEnv":"MCP_TOKEN_BOB","budgets":["Home","Business"]}}
+MCP_TOKEN_ALICE=<openssl rand -hex 32>
+MCP_TOKEN_BOB=<openssl rand -hex 32>
+```
+
+- **The principal** is the JSON key. It keys the #189 budget preference and session
+  ownership, so alice cannot use, close or list bob's sessions.
+- **The allow-list** is `budgets`, written as registry names (`BUDGET_DEFAULT_NAME`,
+  `BUDGET_n_NAME`) and resolved to sync ids at startup. It is enforced by the same checks
+  as the OIDC `AUTH_BUDGET_ACL`: every operation on a budget outside the list is refused,
+  a switch to one returns the same "not found" as a name that does not exist, and the
+  budget listings show only the permitted budgets (#570). A static principal is always
+  restricted; `"*"` is not accepted.
+- **Token requirements**, checked before the server binds: the variable a `tokenEnv`
+  names must start with `MCP_TOKEN_` (so it cannot point at `ACTUAL_PASSWORD`), be set,
+  be at least 32 characters, use only RFC 6750 token characters, and be unique across
+  all principals and `MCP_SSE_AUTHORIZATION`. Any violation, and any unknown budget name,
+  refuses startup with a message that names the variable but never prints a token.
+- **Matching** hashes the presented token and compares it, in constant time, against
+  every configured token with no early exit, so response timing reveals neither which
+  principal matched nor how many exist. Only the SHA-256 digests are kept in memory.
+- **Logs** never print a token: every `MCP_TOKEN_*` value is scrubbed from log output,
+  and the startup line lists principals with their budget counts only.
+- **Coexistence**: `MCP_SSE_AUTHORIZATION` may stay set beside it (the startup log flags
+  it as unrestricted), so clients can move one at a time. `MCP_STATIC_TOKENS` is refused
+  with `AUTH_PROVIDER=oidc`, where the verified JWT decides the principal.
+
+Known limitations:
+
+- **No in-process rate limiter.** Brute force is bounded by the 32-character minimum (at
+  least 128 bits for a hex token); if the server is reachable from an untrusted network,
+  throttle at your reverse proxy.
+- **The session pool is shared.** `MAX_CONCURRENT_SESSIONS` (default 15) counts every
+  principal's sessions together, so one client opening many sessions can starve the
+  others. A per-principal cap is tracked in #577.
+- **One budget is open per process.** Two clients working on different budgets at the
+  same time force a budget reload on every alternation, which serialises all sessions
+  for the reload. Give each client one budget where you can, and for heavy concurrent use
+  of different budgets run one server per budget.
+- **A removed principal's preference entry stays in the store, inert.** The stored budget
+  preference is re-checked against the live allow-list on every restore, so it grants
+  nothing; it is not deleted from the preference file.
+
+**Behaviour change for OIDC (#572).** A session that has not switched and has no stored
+preference now starts on the first budget its allow-list permits, in registry order
+(default budget, then `BUDGET_1`, `BUDGET_2`, ...). Before, an OIDC principal whose list
+excluded the default budget got `Budget ACL:` on every call until it switched. Static and
+OIDC principals share this fallback; a wildcard principal still starts on the default
+budget.
 
 #### 2. **OIDC / JWT Authentication**
 
@@ -155,7 +216,7 @@ When the tokens carry no `scope` claim (Cloudflare Access for SaaS, or Casdoor w
 
 #### Limiting a leaked refresh token (#488)
 
-Scope: this applies to `AUTH_PROVIDER=oidc` over HTTP only. Static bearer auth (`MCP_SSE_AUTHORIZATION`, revoked by rotating the value and restarting) and stdio involve no refresh tokens. If you advertise `offline_access` in `OIDC_SCOPES_SUPPORTED`, the refresh token the client obtains lives at the IdP and outlives anything this server controls. Three facts shape the response:
+Scope: this applies to `AUTH_PROVIDER=oidc` over HTTP only. Static bearer auth (`MCP_SSE_AUTHORIZATION` and `MCP_STATIC_TOKENS`, revoked by rotating the value and restarting) and stdio involve no refresh tokens. If you advertise `offline_access` in `OIDC_SCOPES_SUPPORTED`, the refresh token the client obtains lives at the IdP and outlives anything this server controls. Three facts shape the response:
 
 - This server verifies access tokens locally against the IdP's JWKS (`src/server/httpServer.ts`) and does no token introspection, so an access token that has already been issued stays valid here until its `exp`, even after its refresh token is revoked. A short access-token lifetime matters as much as a short refresh-token lifetime.
 - With the static source (`AUTH_BUDGET_ACL`), the map is parsed once and cached in `src/auth/budget-acl.ts`, so an edit takes effect only after a restart. With `AUTH_BUDGET_ACL_SOURCE=actual`, allowed budgets are cached per principal for 60 seconds, so a change in Actual applies within about a minute.
@@ -377,7 +438,8 @@ also covers the paths that do not touch the active budget. For a session whose
   a budget exists. The `acl_denied` log line keeps the attempted sync id.
 
 Under OIDC a request that reaches these paths with no `allowedBudgets` is refused, as
-every other operation is. Wildcard sessions, `MCP_SSE_AUTHORIZATION`,
+every other operation is. A `MCP_STATIC_TOKENS` principal (#572) is restricted to its
+`budgets` the same way. Wildcard sessions, `MCP_SSE_AUTHORIZATION`,
 `MCP_ALLOW_UNAUTHENTICATED` and stdio are unrestricted and see every budget.
 
 #### Known limitation: `actual_budgets_import` creates an un-ACL'd budget (#334)
@@ -616,13 +678,13 @@ scrape targets), so on an exposed interface anyone who can reach the port can re
 specific private address to keep it off untrusted networks. As of #239 this value is honored:
 it is passed to `app.listen()`, so the server binds only to the configured interface. Leave it
 at `0.0.0.0` only when remote clients must reach the MCP endpoint directly, and pair that with
-authentication (`MCP_SSE_AUTHORIZATION` or OIDC) and ideally a reverse proxy.
+authentication (`MCP_SSE_AUTHORIZATION`, `MCP_STATIC_TOKENS` or OIDC) and ideally a reverse proxy.
 
 #### Session ownership
 
 An MCP session id is bearer material for the Streamable HTTP transport, so each session
-belongs to the principal that initialized it (the OIDC subject, or the single static-bearer
-identity). A POST or GET on the MCP path that carries another principal's session id is
+belongs to the principal that initialized it (the OIDC subject, the `MCP_STATIC_TOKENS`
+principal, or the single static-bearer identity). A POST, GET or DELETE on the MCP path that carries another principal's session id is
 answered exactly as an unknown session would be. `actual_session_list` lists only the
 caller's own sessions (its totals stay pool-wide), and `actual_session_close` only matches
 and closes the caller's own sessions. The unauthenticated `/health` endpoint reports pool
@@ -638,7 +700,7 @@ A blank `MCP_SSE_AUTHORIZATION` with `AUTH_PROVIDER` unset used to disable all H
 authentication silently, and the server binds `0.0.0.0` by default, so a forgotten token
 published the server open on the LAN. As of #242 the server fails closed instead: in HTTP mode,
 if the bind host is non-loopback (anything other than `127.0.0.1`, `::1`, `localhost`,
-`::ffff:127.0.0.1`, so the `0.0.0.0` default counts) AND neither `MCP_SSE_AUTHORIZATION` nor
+`::ffff:127.0.0.1`, so the `0.0.0.0` default counts) AND none of `MCP_SSE_AUTHORIZATION`, `MCP_STATIC_TOKENS` (#572) or
 `AUTH_PROVIDER=oidc` is configured, the server logs a clear error and exits non-zero before
 binding. The decision is made once at startup against the configured bind host (not per request
 on `req.ip`, which a reverse proxy and a spoofed `X-Forwarded-For` could otherwise bypass).

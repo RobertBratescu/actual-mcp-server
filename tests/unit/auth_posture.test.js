@@ -4,7 +4,7 @@
 // server. Imports from dist/, so `npm run build` must run first (the pipeline does).
 import assert from 'assert';
 
-const { isLoopbackHost, evaluateHttpAuthPosture } = await import('../../dist/src/lib/authPosture.js');
+const { isLoopbackHost, evaluateHttpAuthPosture, enforceHttpAuthPosture } = await import('../../dist/src/lib/authPosture.js');
 const { configSchema } = await import('../../dist/src/config.js');
 
 let failed = 0;
@@ -57,6 +57,22 @@ check('loopback + no auth -> serve', () => {
 check('static token set (exposed bind) -> serve', () => {
   const r = evaluateHttpAuthPosture({ bindHost: '0.0.0.0', hasStaticToken: true, oidcEnabled: false, allowUnauthenticated: false });
   assert.strictEqual(r.decision, 'serve');
+});
+check('#572 MCP_STATIC_TOKENS alone (exposed bind) -> serve', () => {
+  // index.ts folds MCP_STATIC_TOKENS into hasStaticToken; auth_posture_wiring spawns it.
+  const r = evaluateHttpAuthPosture({ bindHost: '0.0.0.0', hasStaticToken: true, oidcEnabled: false, allowUnauthenticated: false });
+  assert.strictEqual(r.decision, 'serve');
+});
+check('#572 no auth (exposed bind): the refusal names MCP_STATIC_TOKENS as a remedy', () => {
+  const errors = [];
+  let code = null;
+  try {
+    enforceHttpAuthPosture({ bindHost: '0.0.0.0', hasStaticToken: false, oidcEnabled: false, allowUnauthenticated: false },
+      { error: (m) => errors.push(m), warn: () => {} }, (c) => { code = c; throw new Error('__exit__'); });
+  } catch (e) { if (e.message !== '__exit__') throw e; }
+  assert.strictEqual(code, 1);
+  assert.strictEqual(errors.length, 1);
+  assert.ok(/MCP_STATIC_TOKENS/.test(errors[0]), errors[0]);
 });
 check('oidc enabled (exposed bind) -> serve', () => {
   const r = evaluateHttpAuthPosture({ bindHost: '0.0.0.0', hasStaticToken: false, oidcEnabled: true, allowUnauthenticated: false });

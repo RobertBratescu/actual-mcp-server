@@ -42,7 +42,7 @@ export function isLoopbackHost(host: string | undefined): boolean {
 export interface HttpAuthPostureInput {
   /** The interface the server will bind (e.g. process.env.MCP_BRIDGE_BIND_HOST || '0.0.0.0'). */
   bindHost: string | undefined;
-  /** Whether a non-empty static Bearer token (MCP_SSE_AUTHORIZATION) is set. */
+  /** Whether a static Bearer token is configured: MCP_SSE_AUTHORIZATION or MCP_STATIC_TOKENS (#572). */
   hasStaticToken: boolean;
   /** Whether OIDC is enabled (AUTH_PROVIDER === 'oidc'). */
   oidcEnabled: boolean;
@@ -101,7 +101,8 @@ export function enforceHttpAuthPosture(
   if (decision === 'refuse') {
     log.error(
       `Refusing to start: ${reason}. HTTP auth is required-by-default. ` +
-        'Set MCP_SSE_AUTHORIZATION to a strong token (openssl rand -hex 32), or ' +
+        'Set MCP_SSE_AUTHORIZATION to a strong token (openssl rand -hex 32), or set ' +
+        'MCP_STATIC_TOKENS (one token per client, #572), or ' +
         'set AUTH_PROVIDER=oidc, or bind a loopback host. To deliberately run open ' +
         '(for example behind your own authenticating proxy), set MCP_ALLOW_UNAUTHENTICATED=true.',
     );
@@ -111,7 +112,7 @@ export function enforceHttpAuthPosture(
       `Serving HTTP WITHOUT authentication: ${reason}. Anyone who can reach this ` +
         'port can read and modify your financial data. This is allowed only because ' +
         'MCP_ALLOW_UNAUTHENTICATED=true. Put an authenticating reverse proxy in front, ' +
-        'or set MCP_SSE_AUTHORIZATION / AUTH_PROVIDER=oidc.',
+        'or set MCP_SSE_AUTHORIZATION / MCP_STATIC_TOKENS / AUTH_PROVIDER=oidc.',
     );
   }
 

@@ -516,6 +516,8 @@ All configuration is via environment variables. Copy `.env.example` to `.env` to
 | **Security & Authentication** ||||
 | `AUTH_PROVIDER` | `none` | No | Auth mode: `none` (static Bearer) or `oidc` (JWKS-validated JWT) |
 | `MCP_SSE_AUTHORIZATION` | _(none)_ | No | Static Bearer token (`AUTH_PROVIDER=none`; highly recommended in production) |
+| `MCP_STATIC_TOKENS` | _(none)_ | No | Several static Bearer tokens, one per client, each with its own principal and budget allow-list (#572). JSON keyed by principal: `{"alice":{"tokenEnv":"MCP_TOKEN_ALICE","budgets":["Home"]}}`. Budgets are registry names. Can coexist with `MCP_SSE_AUTHORIZATION` (which stays unrestricted); refused with `AUTH_PROVIDER=oidc`. See [Security](docs/SECURITY_AND_PRIVACY.md) |
+| `MCP_TOKEN_*` | _(none)_ | If named | The token values `MCP_STATIC_TOKENS` points at, one variable per principal (`MCP_TOKEN_ALICE`). At least 32 characters (`openssl rand -hex 32`), unique, RFC 6750 characters only; a bad one refuses to start |
 | `MCP_ALLOW_UNAUTHENTICATED` | `false` | No | Opt-out for required-by-default HTTP auth (#242). On a non-loopback bind with no token and no OIDC the server refuses to start; set to `true` to run open deliberately (e.g. behind your own proxy) |
 | `OIDC_ISSUER` | _(none)_ | If OIDC | OIDC issuer URL (e.g., `https://sso.example.com`) |
 | `OIDC_ALLOW_INSECURE_ISSUER` | `false` | No | Allow a plaintext (http) OIDC issuer on a trusted network (#244). Off by default (http issuer refused at startup); set `true` only for local/LAN testing |

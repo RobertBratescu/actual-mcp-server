@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { parseIdentityMap } from './auth/identity-map.js';
 import { parseBudgetAcl } from './auth/budget-acl-parse.js';
+import { parseStaticTokensConfig, staticTokensConfigured } from './auth/static-tokens.js';
 
 // #466: the byte count body-parser will ACTUALLY enforce for MCP_HTTP_BODY_LIMIT, or
 // null when the value must be refused. Mirrors `bytes.parse` (what body-parser uses)
@@ -98,6 +99,23 @@ export const configSchema = z.object({
   MCP_BRIDGE_PORT: z.string().default('3600'),
   MCP_TRANSPORT_MODE: z.enum(['--http']).default('--http'),
   MCP_SSE_AUTHORIZATION: z.string().optional(),
+  // #572: several static Bearer tokens, each with its own principal and budget
+  // allow-list, as a JSON object keyed by principal:
+  //   {"alice":{"tokenEnv":"MCP_TOKEN_ALICE","budgets":["Home"]}}
+  // Only the SHAPE is checked here (both transports). The tokens themselves
+  // (MCP_TOKEN_*) and the budget names are resolved by the HTTP server before it
+  // binds (src/auth/static-tokens.ts). Unset or blank means the feature is off.
+  MCP_STATIC_TOKENS: z
+    .string()
+    .optional()
+    .superRefine((v: string | undefined, ctx: z.RefinementCtx) => {
+      try {
+        parseStaticTokensConfig(v);
+      } catch (err) {
+        // Safe by contract: names principals and variables, never a token value.
+        ctx.addIssue({ code: 'custom', message: err instanceof Error ? err.message : String(err) });
+      }
+    }),
   // #242: explicit opt-out for the required-by-default HTTP auth gate. When auth
   // is unconfigured AND the bind is non-loopback, the server refuses to start
   // unless this is the exact string 'true'. Strict parse (only 'true' enables)
@@ -319,6 +337,18 @@ export const configSchema = z.object({
         'unrelated userId, so matching sub denies every user. Use AUTH_BUDGET_ACL_CLAIM=auto (the default, ' +
         'which mirrors that precedence), or pin a claim that your IdP also used to populate Actual user_name. ' +
         'See #343.',
+    },
+  )
+  // #572: static tokens are their own authentication mode. Under OIDC the verified
+  // JWT decides the principal and AUTH_BUDGET_ACL the budgets, so a static token
+  // would either be ignored or open a second door; refuse the pairing.
+  .refine(
+    (cfg) => !(cfg.AUTH_PROVIDER === 'oidc' && staticTokensConfigured(cfg.MCP_STATIC_TOKENS)),
+    {
+      path: ['MCP_STATIC_TOKENS'],
+      message:
+        'MCP_STATIC_TOKENS cannot be combined with AUTH_PROVIDER=oidc: under OIDC the verified token decides ' +
+        'the principal and AUTH_BUDGET_ACL decides its budgets. Unset one of them (#572).',
     },
   )
   // When native TLS is enabled, both the cert and key paths must be provided.

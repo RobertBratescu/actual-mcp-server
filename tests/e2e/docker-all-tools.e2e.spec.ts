@@ -27,9 +27,11 @@ test.describe('Docker E2E - ALL 84 TOOLS', () => {
     expect(data).toBeTruthy();
   });
 
-  // #570 filters both budget listings for a RESTRICTED session. This stack authenticates
-  // with one static bearer token, which is unrestricted, so the listings must stay whole:
-  // every configured budget is listed, and each one's file is visible in get_all.
+  // #570 filters both budget listings for a RESTRICTED session. This stack runs without
+  // authentication (docker-compose.test.yaml), so its one principal is unrestricted and the
+  // listings must stay whole: every configured budget is listed, and each one's file is
+  // visible in get_all. Per-token isolation (#572) is covered by the unit rows in
+  // tests/unit/httpServer_static_tokens.test.js instead.
   test('actual_budgets_list_available - an unrestricted session still lists every budget', async ({ mcp }) => {
     const available = await mcp.call('actual_budgets_list_available');
     expect(Array.isArray(available?.budgets)).toBe(true);

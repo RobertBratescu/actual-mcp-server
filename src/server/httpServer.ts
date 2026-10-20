@@ -1,7 +1,7 @@
 // src/server/httpServer.ts
 import type { ActualMCPConnection } from '../lib/ActualMCPConnection.ts';
 import express, { Request, Response } from 'express';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
@@ -14,7 +14,7 @@ import { getLocalIp } from '../utils.js';
 import actualToolsManager from '../actualToolsManager.js';
 import { getConnectionState, connectToActualForSession, shutdownActualForSession, shutdownActual, canAcceptNewSession, isConnectionPoolEnabled } from '../actualConnection.js';
 import { connectionPool, type EvictionReason } from '../lib/ActualConnectionPool.js';
-import { clearSessionBudgetState, setSessionLivenessCheck, initialBudgetForSession } from '../lib/actual-adapter.js';
+import { clearSessionBudgetState, setSessionLivenessCheck, initialBudgetForSession, getBudgetRegistry } from '../lib/actual-adapter.js';
 import { errorLogFields } from '../lib/errors.js';
 import observability from '../observability.js';
 import config from '../config.js';
@@ -28,6 +28,7 @@ import { stripJoseCause } from '../lib/oidc-error-cause.js';
 import { buildAcceptedAudiences } from '../lib/oidc-audiences.js';
 import { parseScopeList } from '../lib/oidc-scopes.js';
 import { budgetAclMiddleware } from '../auth/budget-acl.js';
+import { resolveStaticTokens, matchBearerToken, LEGACY_STATIC_PRINCIPAL } from '../auth/static-tokens.js';
 import { runAclPreflight } from '../auth/budget-acl-dynamic.js';
 import * as https from 'node:https';
 import { finished } from 'node:stream';
@@ -52,14 +53,18 @@ export type { InitFailureCause };
 export { requestContext };
 
 // Resolve the authenticated principal for the per-principal budget preference
-// (#189). OIDC: the verified JWT subject. Static-bearer: a single shared
-// identity (all bearer callers are the same user). Auth-disabled: undefined, so
-// the preference simply no-ops. Never derived from a client-supplied value.
+// (#189). OIDC: the verified JWT subject. A MCP_STATIC_TOKENS token (#572): its
+// own principal, set by authenticateRequest on a match. Legacy static bearer: a
+// single shared identity (all its callers are the same user). Auth-disabled:
+// undefined, so the preference simply no-ops. Never derived from a
+// client-supplied value.
 function resolvePrincipal(req: Request): string | undefined {
   if (config.AUTH_PROVIDER === 'oidc') {
     return (req as Request & { auth?: { subject?: string } }).auth?.subject;
   }
-  return config.MCP_SSE_AUTHORIZATION ? 'static-bearer' : undefined;
+  const staticPrincipal = (req as Request & { staticPrincipal?: string }).staticPrincipal;
+  if (staticPrincipal) return staticPrincipal;
+  return config.MCP_SSE_AUTHORIZATION ? LEGACY_STATIC_PRINCIPAL : undefined;
 }
 
 export async function startHttpServer(
@@ -75,6 +80,15 @@ export async function startHttpServer(
   bindHost = 'localhost',                        // #239: interface to bind; forwarded to listen()
   advertisedUrl?: string
 ) {
+  // #572: resolve MCP_STATIC_TOKENS (token variables, budget names) before anything
+  // binds, so a bad entry refuses startup like an unreadable TLS key. The registry is
+  // read outside any request context, so it is the full, unfiltered list. config.ts
+  // already refused the variable under OIDC, where these entries are never consulted.
+  const bearerEntries = config.AUTH_PROVIDER === 'oidc'
+    ? []
+    : resolveStaticTokens(config.MCP_STATIC_TOKENS, process.env, getBudgetRegistry(), config.MCP_SSE_AUTHORIZATION);
+  const staticPrincipals = bearerEntries.filter((e) => e.allowedBudgets);
+
   const app = express();
   // Explicit body-size cap (#168). An oversized payload is rejected with HTTP 413
   // rather than buffered unbounded. Tunable via MCP_HTTP_BODY_LIMIT (default 512kb).
@@ -360,9 +374,11 @@ export async function startHttpServer(
       return false;
     }
 
-    // Legacy static Bearer token mode (default).
-    // If MCP_SSE_AUTHORIZATION is not configured, allow all requests
-    if (!config.MCP_SSE_AUTHORIZATION) {
+    // Static Bearer token mode (default): MCP_SSE_AUTHORIZATION and/or MCP_STATIC_TOKENS
+    // (#572). Only when NEITHER is configured is every request allowed. Static tokens are
+    // authentication, so MCP_ALLOW_UNAUTHENTICATED (a posture opt-out for the no-auth
+    // case) does not relax this.
+    if (bearerEntries.length === 0) {
       return true;
     }
 
@@ -381,24 +397,24 @@ export async function startHttpServer(
       return false;
     }
 
-    const token = match[1];
-    const expected = config.MCP_SSE_AUTHORIZATION;
+    // Constant-time comparison to defeat timing oracles (#157): matchBearerToken
+    // compares SHA-256 digests with timingSafeEqual against every configured token,
+    // static and legacy, with no early exit (#572).
+    const hit = matchBearerToken(match[1], bearerEntries);
 
-    // Constant-time comparison to defeat timing oracles (#157).
-    // Length-equality short-circuit precedes timingSafeEqual because the
-    // function requires equal-length buffers. Token length is observable
-    // via response timing regardless; the secret bytes are not.
-    const tokenBuf = Buffer.from(token, 'utf8');
-    const expectedBuf = Buffer.from(expected, 'utf8');
-    const equal =
-      tokenBuf.length === expectedBuf.length && timingSafeEqual(tokenBuf, expectedBuf);
-
-    if (!equal) {
+    if (!hit) {
       logger.warn(`[HTTP] Unauthorized request from ${req.ip || req.connection.remoteAddress}: Invalid token`);
       res.status(401).json({ error: 'Unauthorized: Invalid token' });
       return false;
     }
 
+    // A static principal carries its resolved allow-list into the requestContext.run
+    // calls below, where the adapter's ACL chokepoints read it. The legacy token sets
+    // neither field: principal 'static-bearer', unrestricted, exactly as before #572.
+    if (hit.allowedBudgets) {
+      (req as Request & { staticPrincipal?: string }).staticPrincipal = hit.principal;
+      (req as Request & { allowedBudgets?: string[] }).allowedBudgets = [...hit.allowedBudgets];
+    }
     return true;
   };
 
@@ -1049,10 +1065,16 @@ export async function startHttpServer(
       if (config.AUTH_BUDGET_ACL_SOURCE === 'actual') {
         void runAclPreflight();
       }
-    } else if (config.MCP_SSE_AUTHORIZATION) {
-      logger.info(`🔒 HTTP authentication enabled (static Bearer token required)`);
+    } else if (bearerEntries.length > 0) {
+      // #572: principal names and budget COUNTS only; budget names are personal data.
+      const principals = staticPrincipals.map((e) => `${e.principal} (${e.allowedBudgets!.length} budget(s))`).join(', ');
+      logger.info(
+        `🔒 HTTP authentication enabled (Bearer token required)` +
+          (principals ? `; static principals: ${principals}` : '') +
+          (config.MCP_SSE_AUTHORIZATION ? `; MCP_SSE_AUTHORIZATION also accepted (unrestricted)` : ''),
+      );
     } else {
-      logger.warn(`⚠️  HTTP authentication disabled (no MCP_SSE_AUTHORIZATION or OIDC configured)`);
+      logger.warn(`⚠️  HTTP authentication disabled (no MCP_SSE_AUTHORIZATION, MCP_STATIC_TOKENS or OIDC configured)`);
     }
   });
 

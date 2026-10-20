@@ -91,7 +91,8 @@ export const SCHEMA_VARS_ALSO_READ_RAW: ReadonlyArray<{ name: string; readSite: 
  * one. `.env.example` documents example members (BUDGET_1_*, BUDGET_2_*, ...); the
  * drift guard collapses any name starting with one of these to the family.
  */
-export const DYNAMIC_ENV_FAMILIES: readonly string[] = ['BUDGET_'];
+// MCP_TOKEN_ (#572): the per-principal static token values that MCP_STATIC_TOKENS names.
+export const DYNAMIC_ENV_FAMILIES: readonly string[] = ['BUDGET_', 'MCP_TOKEN_'];
 
 /**
  * Variables documented for the operator (e.g. in Docker) but read by the OS or

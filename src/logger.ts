@@ -198,7 +198,9 @@ export function collectSecretValues(env: NodeJS.ProcessEnv = process.env): strin
     // length guard avoids masking short/common values that could collide with benign log
     // text (a short secret is still masked by KEY name when under a sensitive field; only
     // the free-text VALUE scrub is skipped for it).
-    if (typeof v === 'string' && v.length >= 8 && /(PASSWORD|SECRET|AUTHORIZATION|_TOKEN)$/.test(k)) {
+    // MCP_TOKEN_* (#572) are the static Bearer tokens MCP_STATIC_TOKENS names; MCP_TOKEN_ALICE
+    // ends in neither suffix, so the family is matched by prefix.
+    if (typeof v === 'string' && v.length >= 8 && (/(PASSWORD|SECRET|AUTHORIZATION|_TOKEN)$/.test(k) || k.startsWith('MCP_TOKEN_'))) {
       out.push(v);
     }
   }
