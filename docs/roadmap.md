@@ -65,6 +65,12 @@ Split from Backlog: three P2 bugs found while implementing the Reporter follow-u
 
 Outcome: done (2026-10-16). All three tickets shipped in v0.22.46 after one full dual-transport run. Two changed shape on the way: #567 also gained a guard refusing quote characters on id columns, a review finding that also affected earlier releases (credited in the release notes along with PR #568, closed as superseded), and the 401 in #565 turned out to be the local-env container answering the advertised LAN address, so the self-test now targets the bound address and the need for a live Actual server past `initialize` is documented. No new tickets: `NOT IN` and `NOT BETWEEN` on a joined field still reach the parser's existing, explicit "not yet supported" error, unchanged from before.
 
+## Phase: Multi-client isolation
+state: open
+plan: docs/plans/multi-client-isolation.md
+
+Split from Backlog: PR #569 by @jospaquim (per-principal static tokens so several LobeChat assistants can share one server) carried two independent fixes along with the feature. They were filed as #570 (restricted callers can list budgets outside their ACL and import past it), #571 (a session can download its budget from the wrong Actual server in a multi-server registry) and #572 (the `MCP_STATIC_TOKENS` feature, which depends on both). The ACL fix comes first and ships on its own.
+
 ## Phase: Backlog
 state: backlog
 
