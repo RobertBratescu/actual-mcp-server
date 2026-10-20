@@ -37,9 +37,12 @@ test.describe('Docker E2E - ALL 84 TOOLS', () => {
     expect(available.count).toBe(available.budgets.length);
 
     const all = await mcp.call('actual_budgets_get_all');
-    const groupIds = new Set((all?.result ?? []).map((f: { groupId?: string }) => f.groupId));
+    // mcp.call unwraps the tool's { result } envelope, so this is the file array itself.
+    expect(Array.isArray(all), `get_all must return an array; got ${JSON.stringify(all)}`).toBe(true);
+    const groupIds = new Set(all.map((f: { groupId?: string }) => f.groupId));
     for (const budget of available.budgets) {
-      expect(groupIds.has(budget.syncId), `get_all must include the file for ${budget.name}`).toBe(true);
+      expect(groupIds.has(budget.syncId),
+        `get_all must include the file for ${budget.name} (${budget.syncId}); got ${JSON.stringify(all)}`).toBe(true);
     }
   });
 
