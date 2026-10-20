@@ -4,7 +4,7 @@ import os from 'os';
 import api from '@actual-app/api';
 import { loadBudgetTracked } from './lib/budgetLoader.js';
 import { withApiLock } from './lib/apiLock.js';
-import { withOpTimeout } from './lib/opTimeout.js';
+import { initApiLoggedIn } from './lib/apiLogin.js';
 import logger from './logger.js';
 import config from './config.js';
 import { connectionPool } from './lib/ActualConnectionPool.js';
@@ -76,11 +76,7 @@ export async function connectToActual() {
       // settle, `.finally(release)` would never run, and the process-global api mutex would be
       // wedged permanently for every session: the exact #270 class. Both pool sites already bound
       // their `api.init` this way, and this was the only `api.init` in the repo that did not.
-      await withOpTimeout(() => api.init({
-        dataDir: DATA_DIR,
-        serverURL: SERVER_URL,
-        password: PASSWORD,
-      }), 'connectToActual init');
+      await initApiLoggedIn(DATA_DIR, { serverUrl: SERVER_URL, password: PASSWORD || '' }, 'connectToActual init');
 
       log.info(`Downloading budget with sync ID: ${BUDGET_SYNC_ID}`);
 
@@ -145,8 +141,15 @@ export async function shutdownActual() {
 /**
  * Initialize connection for a specific MCP session
  * Uses connection pooling to give each session its own Actual Budget connection
+ *
+ * #571: `budget` is the budget the session opens on (httpServer resolves it with
+ * initialBudgetForSession). Without it the pool logs in to the default server and downloads the
+ * default budget, which is wrong whenever the session's restored budget lives on another server.
  */
-export async function connectToActualForSession(sessionId: string) {
+export async function connectToActualForSession(
+  sessionId: string,
+  budget?: { serverUrl: string; password: string; syncId: string; encryptionPassword?: string },
+) {
   if (!useConnectionPool) {
     // Fallback to shared connection
     return connectToActual();
@@ -155,7 +158,7 @@ export async function connectToActualForSession(sessionId: string) {
   try {
     // Ensure connection pool initialization is complete before accepting connections
     await connectionPool.waitForInitialization();
-    await connectionPool.getConnection(sessionId);
+    await connectionPool.getConnection(sessionId, budget);
     logger.info(`Actual API connection ready for session: ${sessionId}`);
   } catch (err) {
     logger.error(`Failed to connect to Actual for session ${sessionId}:`, err);

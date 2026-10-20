@@ -43,6 +43,9 @@ const CONFIGURED_SYNC_ID = '22222222-2222-2222-2222-222222222222';
   // singleton, so the probe always succeeds here.
   api.default.getBudgetMonths = async () => ['2026-01'];
   api.default.sync = async () => {};
+  // #571: nothing in this file models a login, so the singleton's login is unknown and the
+  // fast path's server-aware load logs in once before downloading. Answer it locally.
+  api.default.init = async () => {};
 
   const { requestContext } = await import('../../dist/src/lib/requestContext.js');
   const adapter = await import('../../dist/src/lib/actual-adapter.js');

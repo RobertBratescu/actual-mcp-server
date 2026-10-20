@@ -14,7 +14,7 @@ import { getLocalIp } from '../utils.js';
 import actualToolsManager from '../actualToolsManager.js';
 import { getConnectionState, connectToActualForSession, shutdownActualForSession, shutdownActual, canAcceptNewSession, isConnectionPoolEnabled } from '../actualConnection.js';
 import { connectionPool, type EvictionReason } from '../lib/ActualConnectionPool.js';
-import { clearSessionBudgetState, setSessionLivenessCheck } from '../lib/actual-adapter.js';
+import { clearSessionBudgetState, setSessionLivenessCheck, initialBudgetForSession } from '../lib/actual-adapter.js';
 import { errorLogFields } from '../lib/errors.js';
 import observability from '../observability.js';
 import config from '../config.js';
@@ -587,7 +587,15 @@ export async function startHttpServer(
             sessionInitPromises.set(sid, initPromise);
             // Initialize connection pool for this session
             try {
-              await connectToActualForSession(sid);
+              // #571: open on the session's own budget (a restored #189 preference may live on
+              // another server), not on the default one.
+              const budget = initialBudgetForSession(sid);
+              await connectToActualForSession(sid, {
+                serverUrl: budget.serverUrl,
+                password: budget.password || '',
+                syncId: budget.syncId,
+                encryptionPassword: budget.encryptionPassword,
+              });
               // Only register the transport if the pool connection succeeded.
               // The pool stamped lastActivity when it created the entry, so it
               // is already the source of truth for this session's idle clock.

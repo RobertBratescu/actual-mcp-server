@@ -26,6 +26,12 @@ process.env.ACTUAL_SERVER_URL     = process.env.ACTUAL_SERVER_URL     ?? 'http:/
 process.env.ACTUAL_BUDGET_SYNC_ID = process.env.ACTUAL_BUDGET_SYNC_ID ?? '00000000-0000-0000-0000-000000000000';
 process.env.ACTUAL_PASSWORD       = process.env.ACTUAL_PASSWORD       ?? 'stub-password-for-unit-test';
 process.env.ACTUAL_OP_TIMEOUT_MS  = process.env.ACTUAL_OP_TIMEOUT_MS  ?? '500';
+// #571: a second budget on the SAME server and password, the common multi-budget deployment.
+// Registering a timed-out login with the #393 registry is reserved for registries that span
+// logins (loginsSpanServers); counting budgets instead of logins would make the init-timeout case
+// below wait on the stalled login and leave the mutex held, so this pins the flag's false side.
+process.env.BUDGET_1_NAME         = process.env.BUDGET_1_NAME         ?? 'Second budget, same login';
+process.env.BUDGET_1_SYNC_ID      = process.env.BUDGET_1_SYNC_ID      ?? '11111111-1111-1111-1111-111111111111';
 
 const BOUND_MS = Number(process.env.REGRESSION_BOUND_MS || 3000);
 const MARKER = new URL('../../scripts/known-failing/270', import.meta.url);

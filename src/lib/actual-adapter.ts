@@ -86,7 +86,8 @@ import { parseBudgetRegistry, type BudgetConfig } from './budget-registry.js';
 import { getPreferredBudgetSyncId, setPreferredBudgetSyncId, pickAllowedPreferredBudget } from './budget-preference-store.js';
 import { requestContext } from './requestContext.js';
 import { connectionPool } from './ActualConnectionPool.js';
-import { isApiInitialized, setApiInitialized, getLoadedBudgetSyncId, awaitAbandonedBudgetLoad, hasPendingBudgetLoad } from './apiState.js';
+import { isApiInitialized, setApiInitialized, getLoadedBudgetSyncId, awaitAbandonedBudgetLoad, hasPendingBudgetLoad, isApiLoggedInTo, setLoginsSpanServers } from './apiState.js';
+import { initApiLoggedIn } from './apiLogin.js';
 import { withApiLock } from './apiLock.js';
 import { loadBudgetTracked, importBudgetTracked } from './budgetLoader.js';
 
@@ -100,6 +101,10 @@ const budgetRegistry = parseBudgetRegistry(process.env, {
   syncId: config.ACTUAL_BUDGET_SYNC_ID,
   encryptionPassword: config.ACTUAL_BUDGET_PASSWORD,
 });
+
+setLoginsSpanServers(
+  new Set([...budgetRegistry.values()].map((b) => JSON.stringify([b.serverUrl, b.password || '']))).size > 1,
+);
 
 logger.info(
   `[ADAPTER] Budget registry: ${budgetRegistry.size} budget(s) — ` +
@@ -187,6 +192,26 @@ function getActiveBudgetConfig(): BudgetConfig {
 }
 
 /**
+ * #571: the budget a NEW session should open on, resolved before its session id is live.
+ *
+ * httpServer opens the pool connection from `onsessioninitialized`, which runs inside the
+ * initialize request's context: principal and ACL are there, the session id is not yet. Without
+ * the id, getActiveBudgetConfig cannot restore the #189 preference, so the connection logged in
+ * to the DEFAULT server and downloaded the default budget even when the session's budget lives
+ * on another server, and the session's first call then asked the default server for it.
+ *
+ * Runs getActiveBudgetConfig with the id added to the CURRENT context, so the ACL and principal
+ * of the initialize request still decide. Its memoisation goes through setSessionBudget, which
+ * the isSessionLive guard keeps from recording a session that already ended.
+ *
+ * Shape credit: @jospaquim (PR #569).
+ */
+export function initialBudgetForSession(sessionId: string): BudgetConfig {
+  const store = requestContext.getStore() ?? {};
+  return requestContext.run({ ...store, sessionId }, () => getActiveBudgetConfig());
+}
+
+/**
  * Global API session mutex.
  * @actual-app/api is a singleton with a single SQLite connection — concurrent
  * init/shutdown pairs corrupt the session.  All callers (reads via withActualApi,
@@ -254,7 +279,10 @@ async function ensureLoadedBudgetMatchesSession(): Promise<void> {
 
   const wanted = getActiveBudgetConfig();
   const loaded = getLoadedBudgetSyncId();
-  if (loaded === wanted.syncId) return;
+  // #571: the sync id alone is not a match. The same sync id can exist on two servers (a budget
+  // copied between them), and a match against the wrong server would run this session's
+  // operation on the other server's copy.
+  if (loaded === wanted.syncId && isApiLoggedInTo(loginOf(wanted))) return;
 
   // Deliberately a WARN: reaching here means two sessions are on different budgets and this
   // one would otherwise have operated on the other's data.
@@ -268,8 +296,14 @@ async function ensureLoadedBudgetMatchesSession(): Promise<void> {
   // per operation, a drain can now change budgets MID-BATCH, and the single trailing api.sync()
   // covers only the last one. Without this, an earlier session's write is applied locally and
   // silently waits for the next load of that budget to propagate, which an ephemeral data dir
-  // would lose entirely.
-  if (loaded) {
+  // would lose entirely. Skipped when the budget lives behind another login: initApiLoggedIn's
+  // upstream shutdown syncs the outgoing budget over the old login anyway, and a second round trip
+  // to that server would hold the process-wide lock for nothing. Accepted cost (#571 review round
+  // 2): upstream shutdown swallows a failed sync, so on that path a failure logs nothing here. The
+  // change is not lost, it stays in the local data dir and syncs at the next load of that budget,
+  // the same outcome as before this skip; only the WARN is gone, and keeping it would double the
+  // stall against an unreachable server.
+  if (loaded && isApiLoggedInTo(loginOf(wanted))) {
     try {
       await withOpTimeout(() => (api as unknown as { sync: () => Promise<unknown> }).sync(), 'sync');
     } catch (syncErr) {
@@ -280,7 +314,45 @@ async function ensureLoadedBudgetMatchesSession(): Promise<void> {
     }
   }
 
-  await loadBudgetTracked(wanted.syncId, wanted.encryptionPassword);
+  await loadBudgetOnItsServer(wanted);
+}
+
+function loginOf(budget: BudgetConfig): { serverUrl: string; password: string } {
+  return { serverUrl: budget.serverUrl, password: budget.password || '' };
+}
+
+/**
+ * #571: load a budget over a login to the server that HOLDS it. MUST be called inside the api lock.
+ *
+ * Every re-selection over a live singleton goes through here (the #390 precondition, which the
+ * kept-alive stdio singleton of #419 reaches too, and switchBudget's same-auth fast path). Both
+ * used to download over whatever login the singleton already had, which is right on a single
+ * server and wrong as soon as another session has logged the singleton in to a different one:
+ * reproduced live as a session on server X failing every call with "Budget not found" for as
+ * long as a session on server Y was active.
+ *
+ * Same server: no new login, so the #127 auth burst #134 removed does not come back.
+ *
+ * Different or unknown server: log in to the budget's own server with the budget's own password
+ * through initApiLoggedIn, which first clears the records and closes (syncing) the outgoing
+ * budget over the old login, then download.
+ *
+ * Failure: initApiLoggedIn clears the loaded-budget and login records before anything else, so
+ * any failure leaves both unknown, the next operation of ANY session re-selects, and the error
+ * reaches the caller as an ordinary tool error. The live flag is deliberately NOT cleared:
+ * clearing it would send every session through the legacy per-operation init (the #127 burst)
+ * until a new session happened to open, while the cleared records already force the one re-login
+ * that recovery needs.
+ *
+ * Never takes the api lock itself: the lock is not reentrant and every caller already holds it.
+ */
+async function loadBudgetOnItsServer(budget: BudgetConfig): Promise<void> {
+  const login = loginOf(budget);
+  if (!isApiLoggedInTo(login)) {
+    logger.info(`[ADAPTER] logging the api in to ${budget.serverUrl} before loading "${budget.name}"`);
+    await withAuthRetry(() => initApiLoggedIn(config.MCP_BRIDGE_DATA_DIR, login, 'init'));
+  }
+  await loadBudgetTracked(budget.syncId, budget.encryptionPassword);
 }
 
 
@@ -871,11 +943,7 @@ async function initActualApiForOperation(): Promise<void> {
     // withAuthRetry does not retry it. Wrapping per-attempt (not the whole retry
     // loop) means legitimate #127 auth-rate-limit backoff (up to ~25s) is not
     // counted against ACTUAL_OP_TIMEOUT_MS.
-    await withAuthRetry(() => withOpTimeout(() => api.init({
-      dataDir: DATA_DIR,
-      serverURL: budget.serverUrl,
-      password: budget.password || '',
-    }), 'init'));
+    await withAuthRetry(() => initApiLoggedIn(DATA_DIR, loginOf(budget), 'init'));
 
     logger.debug('[ADAPTER] Downloading budget');
 
@@ -4702,8 +4770,10 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
       // path was taken by spying on connectionPool.shutdownConnection.
     } else {
       await withApiLock(async () => {
-        // Bound the in-place budget reload too (#270).
-        await loadBudgetTracked(found.syncId, found.encryptionPassword);
+        // Bound the in-place budget reload too (#270). #571: "same auth" compares against THIS
+        // session's pool entry, but the singleton may be logged in to another session's server by
+        // now, so the load still has to make sure it is talking to this budget's server.
+        await loadBudgetOnItsServer(found);
       });
     }
     connectionPool.updateLoadedSyncId(sessionId, found.syncId);

@@ -18,9 +18,9 @@ import path from 'path';
 import os from 'os';
 import fs from 'fs';
 import { isApiInitialized, setApiInitialized } from './apiState.js';
+import { initApiLoggedIn } from './apiLogin.js';
 import { withApiLock, isApiLockHeld } from './apiLock.js';
 import { loadBudgetTracked } from './budgetLoader.js';
-import { withOpTimeout } from './opTimeout.js';
 
 const DEFAULT_DATA_DIR = path.resolve(os.homedir() || '.', '.actual');
 
@@ -352,7 +352,9 @@ class ActualConnectionPool {
     const SERVER_URL = budgetOverride?.serverUrl ?? config.ACTUAL_SERVER_URL;
     const PASSWORD = budgetOverride?.password ?? config.ACTUAL_PASSWORD;
     const BUDGET_SYNC_ID = budgetOverride?.syncId ?? config.ACTUAL_BUDGET_SYNC_ID;
-    const BUDGET_PASSWORD = budgetOverride?.encryptionPassword ?? process.env.ACTUAL_BUDGET_PASSWORD;
+    // #571: an override carries its own budget's encryption password, absent included. Falling back
+    // to the default budget's would bind a budget from another server to a password it never had.
+    const BUDGET_PASSWORD = budgetOverride ? budgetOverride.encryptionPassword : process.env.ACTUAL_BUDGET_PASSWORD;
 
     // Use shared data directory so changes persist across sessions
     // This is critical: all sessions must share the same database to avoid data loss
@@ -380,11 +382,7 @@ class ActualConnectionPool {
       // Bound the session-open init/download (#270): this is the HTTP exposure.
       // A stalled upstream here would otherwise hang session open unbounded and,
       // because the api singleton is process-global, wedge other sessions too.
-      await withOpTimeout(() => api.init({
-        dataDir: DATA_DIR,
-        serverURL: SERVER_URL,
-        password: PASSWORD,
-      }), 'pool init');
+      await initApiLoggedIn(DATA_DIR, { serverUrl: SERVER_URL, password: PASSWORD || '' }, 'pool init');
 
       logger.info(`[ConnectionPool] Downloading budget for session: ${sessionId}`);
 
@@ -480,11 +478,7 @@ class ActualConnectionPool {
       // process-global singleton, so it takes the same mutex.
       await withApiLock(async () => {
       // Bound the session-open init/download (#270), same as getConnection.
-      await withOpTimeout(() => api.init({
-        dataDir: DATA_DIR,
-        serverURL: SERVER_URL,
-        password: PASSWORD,
-      }), 'pool init');
+      await initApiLoggedIn(DATA_DIR, { serverUrl: SERVER_URL, password: PASSWORD || '' }, 'pool init');
 
       // #390: the shared tracked loader, not a hand-written download. It clears the record
       // BEFORE starting and keeps an abandoned load registered, so a session-open download that

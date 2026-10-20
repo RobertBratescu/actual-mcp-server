@@ -27,7 +27,59 @@ export function setApiInitialized(value: boolean): void {
   _apiInitialized = value;
   // A singleton that is not live holds no budget. Clearing here means a shutdown can never
   // leave a stale claim behind for the next caller to trust.
-  if (!value) _loadedBudgetSyncId = null;
+  if (!value) {
+    _loadedBudgetSyncId = null;
+    _apiLogin = null;
+  }
+}
+
+/**
+ * #571: the Actual server (and password) the SINGLETON is currently logged in to.
+ *
+ * With a multi-server registry (`BUDGET_n_SERVER_URL`), a budget can only be downloaded over a
+ * login to the server that holds it. The loaded syncId alone could not say which server that was,
+ * so re-selecting a budget downloaded it over whatever login the last session left behind, and a
+ * session on server Y asked server X for its budget. Recorded right after every successful
+ * `api.init`, cleared with the live flag. Unknown (null) compares as a mismatch, the safe
+ * direction: it costs one extra login, never a download from the wrong server.
+ *
+ * The encryption password is deliberately not part of it: it is passed to every download, so a
+ * change of encryption password needs no new login.
+ */
+export interface ApiLogin {
+  serverUrl: string;
+  password: string;
+}
+
+let _apiLogin: ApiLogin | null = null;
+
+export function setApiLogin(login: ApiLogin | null): void {
+  _apiLogin = login ? { serverUrl: login.serverUrl, password: login.password } : null;
+}
+
+export function isApiLoggedInTo(login: ApiLogin): boolean {
+  return !!_apiLogin && _apiLogin.serverUrl === login.serverUrl && _apiLogin.password === login.password;
+}
+
+/**
+ * #571: whether the budget registry names more than one login (server URL and password).
+ *
+ * Decides whether a timed-out `api.init` is registered as an abandoned load. With ONE login a
+ * late-landing init points the client at the only server there is, which is harmless, and
+ * registering it would turn one stalled login into a fail-closed wait on every later operation
+ * until upstream gave up (the per-request recovery #270 guarantees, checked by
+ * tests/unit/adapter_op_timeout.test.js). With several, a late landing can move the client to
+ * another server under the next operation, so it must be settled first. Set once, by the adapter,
+ * from the parsed registry.
+ */
+let _loginsSpanServers = false;
+
+export function setLoginsSpanServers(value: boolean): void {
+  _loginsSpanServers = value;
+}
+
+export function loginsSpanServers(): boolean {
+  return _loginsSpanServers;
 }
 
 /**
