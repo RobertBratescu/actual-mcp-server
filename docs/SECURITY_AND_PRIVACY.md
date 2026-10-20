@@ -360,27 +360,45 @@ downloading one. It was deliberately not built, because it means touching
 `src/lib/actual-adapter.ts` (the modify-with-caution tier, and the owner of the
 non-reentrant session lock) for a performance gain rather than a correctness one.
 
+#### Listings, import and error text under a restricted ACL (#570)
+
+The budget ACL checks the session's ACTIVE budget on every operation. Since #570 it
+also covers the paths that do not touch the active budget. For a session whose
+`allowedBudgets` is a list (not `["*"]`):
+
+- `actual_budgets_list_available` and `actual_budgets_get_all` return only the
+  permitted budgets. A server budget file that was never uploaded (no group id) is
+  hidden.
+- `actual_budgets_import` is refused with a `Budget ACL:` error, because the budget it
+  creates would belong to no principal's list.
+- Refusals and the switch's "not found" error no longer name budgets or sync ids
+  outside the list. A switch to a budget outside the list returns the same "not
+  found" error as a name that does not exist, so guessing names cannot confirm that
+  a budget exists. The `acl_denied` log line keeps the attempted sync id.
+
+Under OIDC a request that reaches these paths with no `allowedBudgets` is refused, as
+every other operation is. Wildcard sessions, `MCP_SSE_AUTHORIZATION`,
+`MCP_ALLOW_UNAUTHENTICATED` and stdio are unrestricted and see every budget.
+
 #### Known limitation: `actual_budgets_import` creates an un-ACL'd budget (#334)
 
 `actual_budgets_import` wraps `@actual-app/api`'s `importBudget()`, which does not
-merely read a file. Verified against `importActual` in the installed package and
-against a live server: it closes the current budget, restores the archive **under the
-budget id the archive itself carries**, and loads it. Three consequences follow, all
+merely read a file. Read from `importActual` and `cloud-storage` in the installed
+package: it closes the current budget, restores the archive into the local directory
+named by **the budget id the archive itself carries**, clears its cloud file and group
+ids, loads it, and uploads it as a new budget file. Three consequences follow, all
 accepted behaviour rather than defects:
 
-1. **It can OVERWRITE an existing budget.** Because the id comes from the archive
-   rather than being freshly generated, re-importing an export of budget X restores
-   onto budget X and replaces that budget's local data. This is exactly what makes
-   export and import a usable backup-and-restore pair, and it is also why an import
-   against a budget holding real data is destructive. It is only "a new budget" when
-   the archive's id is not already present on the server.
+1. **It can OVERWRITE an existing budget's LOCAL copy.** Re-importing an export of
+   budget X replaces X's local data, which this process serves until X is next
+   downloaded. On the server it never overwrites another budget: the upload always
+   creates a new file (best effort; a failed upload leaves the budget local only).
 2. **A budget the import creates is outside the ACL.** `AUTH_BUDGET_ACL` maps
    principals to budget sync IDs that exist when the ACL is evaluated, so a budget
-   that first appears mid-session has no ACL entry covering it. The ACL is still
-   enforced on the way IN (the write queue uses the same enforcement choke point as
-   every other write, so a caller cannot import while denied the budget they started
-   from), but it cannot constrain a budget that did not exist when the decision was
-   made.
+   that first appears mid-session has no ACL entry covering it. A session with a
+   restricted list is therefore refused the import (#570). A wildcard or
+   unrestricted caller can still import, and the new budget is then visible to every
+   unrestricted caller.
 3. **The `path` input reads the server's filesystem.** The tool accepts a path so an
    operator can restore an `actual_budgets_export` output. That path is not
    restricted to the export directory, so any file the runtime user can read may be

@@ -7,7 +7,7 @@ const InputSchema = z.object({});
 
 const tool: ToolDefinition = {
   name: 'actual_budgets_get_all',
-  description: 'Get a list of all available budget files. Useful for multi-budget management and discovering available budgets on the server.',
+  description: 'Get the budget files on the server that this session may use. Useful for multi-budget management and discovering available budgets.',
   inputSchema: InputSchema,
   call: async (_args: unknown, _meta?: unknown) => {
     const result = await adapter.getBudgets();

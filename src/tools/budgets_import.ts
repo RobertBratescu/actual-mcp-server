@@ -8,13 +8,12 @@ import adapter from '../lib/actual-adapter.js';
  * TWO SIDE EFFECTS EVERY CALLER MUST KNOW, both verified against `importActual` in
  * the installed `@actual-app/api` and against a live server in the Docker E2E run:
  *
- * 1. IT CAN OVERWRITE AN EXISTING BUDGET. The budget id is taken from the ARCHIVE,
- *    not freshly generated. `importActual` closes the current budget, restores the
- *    archive under the id the archive carries, and loads it. So re-importing an
- *    export of budget X restores ONTO budget X, replacing that budget's local data.
- *    This is what makes export/import a genuine backup-and-restore pair, and it is
- *    also why an import against a budget with real data is destructive. It is only
- *    "a new budget" when the archive's id is not already present.
+ * 1. IT CAN OVERWRITE AN EXISTING BUDGET'S LOCAL COPY. The local budget directory is
+ *    keyed by the id the ARCHIVE carries, so re-importing an export of budget X
+ *    replaces X's local data. On the SERVER it never overwrites anything (#570):
+ *    `importActual` clears the cloud file and group ids and uploads the result as a
+ *    NEW budget file (best effort; a failed upload leaves it local only).
+ *    A session with a restricted budget ACL is refused this tool outright (#570).
  * 2. IT CHANGES THE ACTIVE BUDGET. The imported budget is loaded, so the session
  *    switches to it. If the archive's id is not in the `BUDGET_N_*` registry, that
  *    budget is also outside whatever set the ACL resolved for this request, and
@@ -79,7 +78,7 @@ export default createTool({
   description:
     'Restore or import a budget from an Actual Budget ".zip" export or a YNAB4/YNAB5 export. ' +
     'DESTRUCTIVE: the budget id comes from the archive, so re-importing an export REPLACES that ' +
-    'budget\'s data rather than creating a copy. Never call this to "have a look at" a file. Confirm ' +
+    'budget\'s local copy, and the result is uploaded to the server as a new budget file. Never call this to "have a look at" a file. Confirm ' +
     'with the user before importing over a budget that holds real data. ' +
     'It also LOADS the imported budget, so the active budget for this session changes; if the archive\'s ' +
     'budget is not in the configured list, call actual_budgets_list_available and actual_budgets_switch ' +

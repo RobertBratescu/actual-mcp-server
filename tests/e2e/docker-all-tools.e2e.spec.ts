@@ -27,6 +27,22 @@ test.describe('Docker E2E - ALL 84 TOOLS', () => {
     expect(data).toBeTruthy();
   });
 
+  // #570 filters both budget listings for a RESTRICTED session. This stack authenticates
+  // with one static bearer token, which is unrestricted, so the listings must stay whole:
+  // every configured budget is listed, and each one's file is visible in get_all.
+  test('actual_budgets_list_available - an unrestricted session still lists every budget', async ({ mcp }) => {
+    const available = await mcp.call('actual_budgets_list_available');
+    expect(Array.isArray(available?.budgets)).toBe(true);
+    expect(available.budgets.length).toBeGreaterThanOrEqual(1);
+    expect(available.count).toBe(available.budgets.length);
+
+    const all = await mcp.call('actual_budgets_get_all');
+    const groupIds = new Set((all?.result ?? []).map((f: { groupId?: string }) => f.groupId));
+    for (const budget of available.budgets) {
+      expect(groupIds.has(budget.syncId), `get_all must include the file for ${budget.name}`).toBe(true);
+    }
+  });
+
   // ==================== TOOL ANNOTATIONS (#379) ====================
   test('tools/list - every tool publishes MCP annotations that match its nature', async ({ mcp }) => {
     // #383: HTTP-only. It reads the raw JSON-RPC envelope through `mcp.post`, and stdio has no

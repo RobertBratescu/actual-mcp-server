@@ -40,7 +40,10 @@
 // point runs `_enforceBudgetAcl`, which refuses when the request context has no
 // allowedBudgets. Resolving the ACL would therefore be blocked by the ACL it is
 // trying to compute. We break that circularity by running ONLY this one call
-// inside `requestContext.run({ allowedBudgets: ['*'] }, ...)`.
+// inside `requestContext.run({ allowedBudgets: ['*'] }, ...)`. Since #570 the
+// wildcard matters twice: `getBudgets()` also FILTERS its result to the context's
+// allowedBudgets, so without it the resolver would see only the files the
+// caller's (not yet computed) list already permits.
 //
 // That is sound rather than a loophole: `getBudgets()` lists budget FILES
 // (name, id, who may access them). It reads no budget CONTENTS: no accounts, no

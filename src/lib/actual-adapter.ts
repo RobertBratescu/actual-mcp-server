@@ -488,9 +488,7 @@ function abortBatchOnInfrastructureError(
  * Claude Desktop / Claude Code compatibility.
  */
 function _enforceBudgetAcl(toolName?: string): void {
-  const store = requestContext.getStore();
-  const sessionId = store?.sessionId;
-  const allowedBudgets = store?.allowedBudgets;
+  const sessionId = requestContext.getStore()?.sessionId;
 
   // Trusted-local short-circuit. stdio and startup health checks run with no
   // sessionId; in non-OIDC modes those are by-construction trusted (single
@@ -500,25 +498,8 @@ function _enforceBudgetAcl(toolName?: string): void {
     return;
   }
 
-  // OIDC + no allowedBudgets in context: the request slipped past the
-  // middleware. Defence-in-depth: refuse rather than fail open.
-  if (config.AUTH_PROVIDER === 'oidc' && !allowedBudgets) {
-    logger.warn(
-      JSON.stringify({
-        event: 'acl_denied',
-        reason: 'no_allowed_budgets_in_context',
-        sessionId: sessionId ?? null,
-        tool: toolName ?? null,
-      }),
-    );
-    throw new Error(
-      'Budget ACL: no allowedBudgets in request context. ' +
-        'This request bypassed the budget-acl middleware. Refusing for safety. See #156.',
-    );
-  }
-
-  // No restriction.
-  if (!allowedBudgets || allowedBudgets.includes('*')) return;
+  const allowedBudgets = restrictedAllowedBudgets(toolName);
+  if (!allowedBudgets) return;
 
   const target = getActiveBudgetConfig();
   if (!allowedBudgets.includes(target.syncId)) {
@@ -532,10 +513,53 @@ function _enforceBudgetAcl(toolName?: string): void {
         tool: toolName ?? null,
       }),
     );
+    // #570: the name and syncId stay in the log above, never in the caller-facing
+    // text. With no selection the active budget is the registry's first entry, so
+    // naming it told a principal allowed only another budget what the default was.
     throw new Error(
-      `Budget ACL: budget "${target.name}" (${target.syncId}) is not in this session's allowedBudgets.`,
+      "Budget ACL: the active budget is not in this session's allowedBudgets. " +
+        'Call actual_budgets_list_available and switch to a permitted budget.',
     );
   }
+}
+
+/**
+ * The request's budget allow-list when the caller is RESTRICTED, else `undefined` (#570).
+ *
+ * Shared by `_enforceBudgetAcl` (the active budget) and the paths that check nothing
+ * about the active budget: the two listings, the import and the switch's not-found
+ * list. One decision, so the two kinds of check cannot drift apart.
+ *
+ *   - `AUTH_PROVIDER=oidc` with no `allowedBudgets` in context: the request slipped
+ *     past the middleware, so throw (fail closed), with an `acl_denied` warn.
+ *   - a list containing `"*"`, or no list outside OIDC (bearer, no-auth, stdio, CLI,
+ *     startup): unrestricted.
+ *   - otherwise: the list.
+ *
+ * Keyed on the request's allow-list, not on AUTH_PROVIDER, so any auth mode that
+ * attaches a list is restricted by it.
+ */
+function restrictedAllowedBudgets(toolName?: string): string[] | undefined {
+  const store = requestContext.getStore();
+  const allowedBudgets = store?.allowedBudgets;
+
+  if (config.AUTH_PROVIDER === 'oidc' && !allowedBudgets) {
+    logger.warn(
+      JSON.stringify({
+        event: 'acl_denied',
+        reason: 'no_allowed_budgets_in_context',
+        sessionId: store?.sessionId ?? null,
+        tool: toolName ?? null,
+      }),
+    );
+    throw new Error(
+      'Budget ACL: no allowedBudgets in request context. ' +
+        'This request bypassed the budget-acl middleware. Refusing for safety. See #156.',
+    );
+  }
+
+  if (!allowedBudgets || allowedBudgets.includes('*')) return undefined;
+  return allowedBudgets;
 }
 
 /**
@@ -4537,7 +4561,17 @@ export async function getBudgets(): Promise<unknown[]> {
   return withActualApi(async () => {
     observability.incrementToolCall('actual.budgets.getAll').catch(() => {});
     const raw = await withConcurrency(() => retry(() => rawGetBudgets() as Promise<unknown>, { retries: 2, backoffMs: 200 }));
-    return Array.isArray(raw) ? raw : [];
+    const files = Array.isArray(raw) ? raw : [];
+    // #570: a restricted caller sees only files whose groupId (the sync id) it may
+    // use. A file with no groupId was never uploaded and belongs to no list. The
+    // dynamic ACL resolver calls this under its own `allowedBudgets: ['*']`, so it
+    // still sees every file.
+    const allowed = restrictedAllowedBudgets('actual_budgets_get_all');
+    if (!allowed) return files;
+    return files.filter(f => {
+      const groupId = (f as { groupId?: unknown } | null)?.groupId;
+      return typeof groupId === 'string' && allowed.includes(groupId);
+    });
   });
 }
 
@@ -4579,14 +4613,19 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
 
   const key = name.toLowerCase();
   const found: BudgetConfig | undefined = budgetRegistry.get(key);
-  if (!found) {
-    const available = [...budgetRegistry.values()].map(b => `"${b.name}"`).join(', ');
-    throw new Error(
+  // #570: a restricted caller is told only about budgets it may use.
+  const notFound = (): Error => {
+    const permitted = restrictedAllowedBudgets('actual_budgets_switch');
+    const available = [...budgetRegistry.values()]
+      .filter(b => !permitted || permitted.includes(b.syncId))
+      .map(b => `"${b.name}"`).join(', ') || 'none permitted for this session';
+    return new Error(
       `Budget "${name}" not found in configuration. ` +
       `Available budgets: ${available}. ` +
       `Add BUDGET_n_NAME/SYNC_ID/SERVER_URL vars to configure additional budgets.`,
     );
-  }
+  };
+  if (!found) throw notFound();
 
   // ACL enforcement: the target budget must be in this session's allowedBudgets.
   // OIDC mode: explicit ACL required. Non-OIDC: short-circuit allow (single-user).
@@ -4615,9 +4654,12 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
           tool: 'actual_budgets_switch',
         }),
       );
-      throw new Error(
-        `Budget ACL: budget "${found.name}" (${found.syncId}) is not in this session's allowedBudgets.`,
-      );
+      // #570: a denied budget gets the SAME error as an unknown name, so guessing
+      // names cannot confirm that a budget outside the list exists. The round 1
+      // review accepted a distinct "Budget ACL:" refusal here; that was reversed
+      // because hiding other budgets is the point of this ticket. The log above
+      // keeps the syncId for the operator.
+      throw notFound();
     }
   }
 
@@ -4744,10 +4786,13 @@ export function clearSessionBudgetState(sessionId: string): void {
 }
 
 /**
- * Return all configured budgets from the registry (for listing in actual_budgets_list_available).
+ * Return the configured budgets this caller may use (for actual_budgets_list_available).
+ * A restricted caller sees only its permitted entries (#570); the startup registry log
+ * reads the Map directly and is not filtered.
  */
 export function getBudgetRegistry(): Array<{ name: string; syncId: string; serverUrl: string; hasEncryption: boolean }> {
-  return [...budgetRegistry.values()].map(b => ({
+  const allowed = restrictedAllowedBudgets('actual_budgets_list_available');
+  return [...budgetRegistry.values()].filter(b => !allowed || allowed.includes(b.syncId)).map(b => ({
     name: b.name,
     syncId: b.syncId,
     serverUrl: b.serverUrl,
@@ -4974,14 +5019,35 @@ export async function exportBudget(): Promise<Uint8Array> {
  * Side effect worth knowing at every call site: upstream `importBudget` LOADS the
  * imported budget, so the session's active budget changes to the new file. It is
  * therefore outside the `BUDGET_N_*` registry and outside whatever budget the ACL
- * resolved for this request. The write queue still enforces the ACL on entry, so a
- * caller cannot use this to escape a budget they were already denied, but the
- * resulting budget is un-ACL'd because it did not exist when the ACL was built.
+ * resolved for this request. The resulting budget is un-ACL'd because it did not
+ * exist when the ACL was built, so a RESTRICTED caller is refused outright (#570),
+ * before any lock or upstream call. Wildcard and unrestricted callers can still
+ * import; the write queue also enforces the ACL on their active budget.
+ *
+ * Upstream creates a NEW cloud file for the import (fresh id, best-effort upload),
+ * so it never overwrites another budget on the server. The local copy is keyed by
+ * the archive's own id, so an archive of budget X replaces X's LOCAL copy.
  */
 export async function importBudget(
   input: string | Uint8Array,
   opts: { type?: string; filename?: string } = {},
 ): Promise<{ id: string }> {
+  const restricted = restrictedAllowedBudgets('actual_budgets_import');
+  if (restricted) {
+    logger.warn(
+      JSON.stringify({
+        event: 'acl_denied',
+        reason: 'import_by_restricted_principal',
+        allowedBudgets: restricted,
+        sessionId: requestContext.getStore()?.sessionId ?? null,
+        tool: 'actual_budgets_import',
+      }),
+    );
+    throw new Error(
+      'Budget ACL: actual_budgets_import is not available to a session with a restricted ' +
+        'allowedBudgets list: the imported budget would belong to no permitted list.',
+    );
+  }
   observability.incrementToolCall('actual.budgets.import').catch(() => {});
   const result = await queueWriteOperation(async () => {
     // #394: an import re-points the process-global singleton exactly as a download does, so it

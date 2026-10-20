@@ -220,7 +220,9 @@ async function setupLoggerCapture() {
     } catch (e) {
       caught = e;
     }
-    if (caught && /Budget ACL/.test(caught.message) && /Production/.test(caught.message)) {
+    // #570: a denied target returns the unknown-name error, so the refusal cannot
+    // confirm that "Production" exists; the acl_denied log below is the evidence.
+    if (caught && /not found in configuration/.test(caught.message) && !/Budget ACL/.test(caught.message)) {
       pass('switchBudget refused disallowed target');
     } else {
       bad('expected ACL denial on switch', caught ? caught.message : 'no error thrown');
