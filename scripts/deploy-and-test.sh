@@ -53,6 +53,9 @@ DOCKER_DIR="$HOME/docker/librechat-MCP-actual"
 # reporting the current sha. Overridable for an unusual layout, but the default
 # now follows the script.
 DEV_DIR="${DEV_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# #576: the release evidence is written as the LAST step. Remove a previous run's file
+# first, so this run can only end with fresh evidence or none.
+rm -f "$DEV_DIR/.release/dual-transport-report.json"
 if [ ! -d "$DEV_DIR/.git" ]; then
   echo "FATAL: DEV_DIR is not a git working tree: $DEV_DIR" >&2
   exit 2
@@ -286,30 +289,6 @@ if [ "$STDIO_EXIT" -ne 0 ]; then
 fi
 echo ""
 
-# ── 8b. Emit the release evidence artifact ─────────────────────────────────
-# #280: the release skill's precondition 5 verifies this file. The `sha` makes the
-# evidence unforgeable across commits: any new commit on develop invalidates it, so a
-# promotion can never rest on a stale or recycled run. Never committed (.gitignore).
-#
-# `residue: 0` is sound by construction, not an assumption: the runner exits 3 when its
-# post-run zero-residue assertion finds anything, and both branches above abort the script
-# on a non-zero exit. Reaching this line therefore means both transports asserted clean.
-REPORT_DIR="$DEV_DIR/.release"
-mkdir -p "$REPORT_DIR"
-cat > "$REPORT_DIR/dual-transport-report.json" <<JSON
-{
-  "sha": "$(git -C "$DEV_DIR" rev-parse HEAD)",
-  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "level": "${TEST_LEVEL}",
-  "transports": {
-    "http":  { "exit": ${HTTP_EXIT}, "residue": 0 },
-    "stdio": { "exit": ${STDIO_EXIT}, "residue": 0 }
-  }
-}
-JSON
-ok "Release evidence written: .release/dual-transport-report.json"
-echo ""
-
 # ── 9. (full level only) #270 upstream-stall regression (stdio + HTTP) ──────
 # Reproduces the budget-tracker production hang: a stalled upstream operation
 # must reject within a bounded time (per-op timeout) and release the global api
@@ -368,7 +347,50 @@ if [ "$TEST_LEVEL" = "full" ]; then
     node "$DEV_DIR/scripts/diag-270-http.mjs"
   set -e
   echo ""
+  # #576: step 9 runs after the runner's zero-residue assertion, so its leaks were
+  # invisible to the release evidence (236 REG270 categories piled up). Re-assert,
+  # settled, before the report can say clean.
+  info "  Post-step-9 zero-residue check (#576)..."
+  set +e
+  env "MCP_AUTH_TOKEN=$MCP_AUTH_TOKEN" "MCP_HTTP_URL=$MCP_SERVER_URL" \
+    node "$DEV_DIR/scripts/assert-no-residue.mjs"
+  RESIDUE_EXIT=$?
+  set -e
+  if [ "$RESIDUE_EXIT" -ne 0 ]; then
+    err "Post-step-9 residue check failed (exit ${RESIDUE_EXIT}); no release evidence written."
+    exit "$RESIDUE_EXIT"
+  fi
+  ok "  Post-step-9: zero residue"
+  echo ""
 else
   info "Step 9/9: #270 upstream-stall regression skipped (runs at 'full' level only; current level=${TEST_LEVEL})."
 fi
+# ── 10. Emit the release evidence artifact ─────────────────────────────────
+# #280: the release skill's precondition 5 verifies this file. The `sha` makes the
+# evidence unforgeable across commits: any new commit on develop invalidates it, so a
+# promotion can never rest on a stale or recycled run. Never committed (.gitignore).
+#
+# `residue: 0` is sound by construction, not an assumption: the runner exits 3 when its
+# post-run zero-residue assertion finds anything, and both branches above abort the script
+# on a non-zero exit. At the full level step 9 runs AFTER those assertions, so the
+# post-step-9 check (#576) re-asserts zero residue and also aborts on failure. Reaching
+# this line therefore means both transports, and step 9, left the budget clean. It is
+# written last, and the stale file is removed at the start of the run, so a run that
+# dies anywhere never leaves a green artifact behind.
+REPORT_DIR="$DEV_DIR/.release"
+mkdir -p "$REPORT_DIR"
+cat > "$REPORT_DIR/dual-transport-report.json" <<JSON
+{
+  "sha": "$(git -C "$DEV_DIR" rev-parse HEAD)",
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "level": "${TEST_LEVEL}",
+  "transports": {
+    "http":  { "exit": ${HTTP_EXIT}, "residue": 0 },
+    "stdio": { "exit": ${STDIO_EXIT}, "residue": 0 }
+  }
+}
+JSON
+ok "Release evidence written: .release/dual-transport-report.json"
+echo ""
+
 ok "All done: deploy-and-test complete (HTTP + stdio${TEST_LEVEL:+, level=$TEST_LEVEL})"

@@ -22,6 +22,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { deleteOwnObjects } from './lib/harness-cleanup.mjs';
 const pexec = promisify(execFile);
 
 const ACTUAL_CTR = process.env.REGRESSION_ACTUAL_CTR || 'finance-actual-budget-main';
@@ -45,13 +46,18 @@ const transport = new StdioClientTransport({
 const client = new Client({ name: 'regression-270', version: '1.0.0' }, { capabilities: {} });
 
 const textOf = (r) => r?.content?.find((c) => c.type === 'text')?.text ?? '';
-const create = (label, groupId) => client.callTool({ name: 'actual_categories_create', arguments: { name: `REG270-${label}-${process.pid}`, group_id: groupId } });
+// #576: every name this run creates is `MCP-REG270-<label>-<RUN_ID>`. The 13-digit id
+// puts it in the shape the pre-run residue sweep already removes (TEST_OBJECT_RE in
+// tests/manual/residue.js), and it is what removeOwnObjects() below matches exactly.
+const RUN_ID = Date.now();
+const PREFIX = 'MCP-REG270';
+const create = (label, groupId) => client.callTool({ name: 'actual_categories_create', arguments: { name: `MCP-REG270-${label}-${RUN_ID}`, group_id: groupId } });
 
 async function getGroupId() {
   const g = await client.callTool({ name: 'actual_category_groups_get', arguments: {} });
   const groups = JSON.parse(textOf(g) || '{}').groups || [];
   if (groups.length) return groups[0].id;
-  const created = await client.callTool({ name: 'actual_category_groups_create', arguments: { name: `REG270-grp-${process.pid}` } });
+  const created = await client.callTool({ name: 'actual_category_groups_create', arguments: { name: `MCP-REG270-grp-${RUN_ID}` } });
   return JSON.parse(textOf(created) || '{}').groupId;
 }
 
@@ -82,7 +88,7 @@ async function main() {
     log(`step 2 KNOWN-FAIL: create still HANGING after ${now() - start}ms (no operation timeout)`);
     await netemClear(); // let the in-flight call error out and release
     console.log('\nRESULT: KNOWN #270 hang reproduced (stalled op did not reject within the bound).');
-    process.exit(2);
+    return 2;
   }
 
   log(`step 2 ok: stalled create ${outcome} within ${now() - start}ms`);
@@ -92,20 +98,43 @@ async function main() {
   const r2 = await create('recovery', groupId);
   if (r2.isError) {
     console.log('\nRESULT: FAIL. Recovery write errored after link restore: ' + textOf(r2));
-    process.exit(2);
+    return 2;
   }
   log('step 3 ok: recovery create succeeded (mutex was released)');
   console.log('\nRESULT: PASS. Stalled op rejected within bound and the lock recovered (#270 behavior correct).');
-  process.exit(0);
+  return 0;
 }
 
 // Always restore the network, whatever happens.
 const cleanup = async () => { try { await netemClear(); } catch { /* ignore */ } };
-process.on('SIGINT', async () => { await cleanup(); process.exit(1); });
-process.on('SIGTERM', async () => { await cleanup(); process.exit(1); });
 
-main().catch(async (e) => {
-  await cleanup();
+// #576: delete this run's MCP-REG270-*-<RUN_ID> objects on EVERY outcome, including the
+// hang path, after the network is restored, through this run's own client (never a
+// second stdio server on the same data dir). Best effort and bounded: the verdict is
+// decided before this runs and is never changed by it. A write that timed out can still
+// land a moment later (#493), so a second pass runs after a short settle.
+const SETTLE_MS = 3000;
+const removeOwnObjects = async () => {
+  try {
+    const call = (name, args) => client.callTool({ name, arguments: args });
+    const first = await deleteOwnObjects(call, { prefix: PREFIX, runId: RUN_ID });
+    if (first.timedOut) return;
+    await new Promise((r) => setTimeout(r, SETTLE_MS));
+    await deleteOwnObjects(call, { prefix: PREFIX, runId: RUN_ID });
+  } catch (e) {
+    console.log(`  cleanup: skipped (${e?.message || e})`);
+  }
+};
+// Works for a signal sent to this pid. A terminal Ctrl-C also reaches the docker exec
+// child (same process group), so the transport is gone and the next pre-run sweep cleans.
+const onSignal = async () => { await cleanup(); await removeOwnObjects(); process.exit(1); };
+process.on('SIGINT', onSignal);
+process.on('SIGTERM', onSignal);
+
+const code = await main().catch(async (e) => {
   console.error('\nRESULT: ERROR (harness/environment): ' + (e?.message || e));
-  process.exit(1);
+  return 1;
 });
+await cleanup();
+await removeOwnObjects();
+process.exit(code);

@@ -131,6 +131,38 @@ check('HARVEST: the partition over every MCP-* literal is EXHAUSTIVE', () => {
   console.log(`     (harvest: ${nameShaped} name-shaped templates, ${ruleMarkers} rule markers)`);
 });
 
+// --- #576: the step 9 harness scripts reuse the MCP-<...>-<13 digits> shape ------------
+check('MATCH (#576): MCP-REG270/MCP-DIAG270 harness names with a run id', () => {
+  for (const n of [`MCP-REG270-baseline-${EPOCH}`, `MCP-REG270-grp-${EPOCH}`, `MCP-DIAG270-mid-${EPOCH}`]) {
+    assert.ok(isTestObjectName(n), `should match: ${n}`);
+  }
+});
+
+check('REJECT (#576): REG270 names that are not ours are never swept', () => {
+  // The legacy pid-suffixed names (removed once by hand) and human names stay invisible:
+  // the sweep regex was NOT loosened for this ticket.
+  for (const n of ['REG270 budget', 'REG270-baseline', 'REG270-baseline-12345', `REG270-baseline-${EPOCH}`, 'MCP-REG270-baseline-12345']) {
+    assert.ok(!isTestObjectName(n), `must NOT match: ${n}`);
+  }
+});
+
+await checkAsync('HARVEST (#576): every name the step 9 scripts generate matches the sweep AND the per-run cleanup', async () => {
+  const { ownNameRe } = await import('../../scripts/lib/harness-cleanup.mjs');
+  let seen = 0;
+  for (const [file, prefix] of [['regression-270-stall.mjs', 'MCP-REG270'], ['diag-270-http.mjs', 'MCP-DIAG270']]) {
+    const src = readFileSync(join(ROOT, 'scripts', file), 'utf8');
+    // Any REG270/DIAG270 template literal (one interpolating a value), prefixed or not, so
+    // a regression to the old shape is seen. Backticked prose in comments has no `${`.
+    for (const m of src.matchAll(/`((?:MCP-)?(?:REG|DIAG)270-[^`]*\$\{[^`]*)`/g)) {
+      const name = m[1].replace(/\$\{RUN_ID\}/g, EPOCH).replace(/\$\{[^}]*\}/g, 'label');
+      assert.ok(isTestObjectName(name), `${file}: ${m[1]} -> ${name} is invisible to the pre-run sweep`);
+      assert.ok(ownNameRe(prefix, EPOCH).test(name), `${file}: ${m[1]} -> ${name} is invisible to the run's own cleanup`);
+      seen++;
+    }
+  }
+  assert.ok(seen >= 4, `expected the harness templates to be harvested, got ${seen}`);
+});
+
 check('the regex is anchored (no substring match inside a longer human name)', () => {
   assert.ok(!isTestObjectName(`My MCP-Test-${ISO} account`));
   assert.ok(!isTestObjectName(`MCP-Test-${ISO}!`));

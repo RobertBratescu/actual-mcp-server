@@ -16,6 +16,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { deleteOwnObjects } from './lib/harness-cleanup.mjs';
 const pexec = promisify(execFile);
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; // local self-signed bearer cert on :3601
@@ -37,19 +38,33 @@ const mkClient = () => {
   return { client: new Client({ name: 'diag-270-http', version: '1.0.0' }, { capabilities: {} }), transport: t };
 };
 const textOf = (r) => r?.content?.find((c) => c.type === 'text')?.text ?? '';
+// #576: `MCP-DIAG270-<label>-<RUN_ID>`, the shape the pre-run residue sweep removes.
+const RUN_ID = Date.now();
 const bounded = (p) => Promise.race([p, new Promise((r) => setTimeout(() => r('__HANG__'), BOUND_MS))]);
+
+// #576: every exit path (normal, error, SIGINT, SIGTERM) removes this run's
+// MCP-DIAG270-*-<RUN_ID> categories through session A (B may never have opened), after
+// netem is cleared. Bounded and best effort; a leak here would fail the post-step-9
+// residue check, which this informational script must never do.
+let A = null;
+async function removeOwnObjects() {
+  if (!A) return;
+  try {
+    await deleteOwnObjects((name, args) => A.client.callTool({ name, arguments: args }), { prefix: 'MCP-DIAG270', runId: RUN_ID, log });
+  } catch { /* deleteOwnObjects never throws; belt and braces */ }
+}
 
 async function main() {
   // A: steady-state pooled write under a mid-session stall.
-  const A = mkClient();
+  A = mkClient();
   await A.client.connect(A.transport);
   const g = await A.client.callTool({ name: 'actual_category_groups_get', arguments: {} });
   const gid = (JSON.parse(textOf(g) || '{}').groups || [])[0]?.id;
-  await A.client.callTool({ name: 'actual_categories_create', arguments: { name: `DIAG270-base-${process.pid}`, group_id: gid } });
+  await A.client.callTool({ name: 'actual_categories_create', arguments: { name: `MCP-DIAG270-base-${RUN_ID}`, group_id: gid } });
   T0 = now();
   log('A: session open; baseline write OK. Blackholing upstream...');
   await blackhole();
-  const wr = await bounded(A.client.callTool({ name: 'actual_categories_create', arguments: { name: `DIAG270-mid-${process.pid}`, group_id: gid } }).then((r) => (r.isError ? 'rejected' : 'resolved'), () => 'rejected'));
+  const wr = await bounded(A.client.callTool({ name: 'actual_categories_create', arguments: { name: `MCP-DIAG270-mid-${RUN_ID}`, group_id: gid } }).then((r) => (r.isError ? 'rejected' : 'resolved'), () => 'rejected'));
   log(`A: steady-state pooled write during stall -> ${wr === '__HANG__' ? 'HANG' : wr} (expected: resolved; offline-first)`);
   await clearNet();
 
@@ -68,11 +83,14 @@ async function main() {
   log(`B: session-open under stall -> ${initRes === '__HANG__' ? 'client still waiting' : initRes} at phase='${phase}' (client-side timeout ~11s; server mutex covered by the unit test)`);
   await clearNet();
   await bounded(initRun).catch(() => {});
+  await removeOwnObjects();
 
   console.log('\nDIAG (informational): HTTP steady-state tolerates a mid-session stall; session-open stalls server-side.');
   console.log('DIAG: the SERVER-side timeout+lock-release guarantee is gated by tests/unit/adapter_op_timeout.test.js.');
   process.exit(0);
 }
 
-process.on('SIGINT', async () => { await clearNet(); process.exit(0); });
-main().catch(async (e) => { await clearNet(); console.error('DIAG note: harness/env issue (non-fatal): ' + (e?.message || e)); process.exit(0); });
+const onSignal = async () => { await clearNet(); await removeOwnObjects(); process.exit(0); };
+process.on('SIGINT', onSignal);
+process.on('SIGTERM', onSignal);
+main().catch(async (e) => { await clearNet(); await removeOwnObjects(); console.error('DIAG note: harness/env issue (non-fatal): ' + (e?.message || e)); process.exit(0); });
