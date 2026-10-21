@@ -35,10 +35,25 @@ const api = apiMod.default || apiMod;
 
 let server = null, live = false, loaded = null;
 const calls = [];
+// #574: with logins on two servers the password login is a fetch to <server>/account/login, and
+// `api.init` only points the client (`password: ''`). Both record the same 'init' entry, so the
+// rows read the same whichever path a login takes.
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (url, opts = {}) => {
+  const m = /^(.*)\/account\/login$/.exec(String(url));
+  if (!m || !SERVERS[m[1]]) return realFetch(url, opts);
+  const { password } = JSON.parse(opts.body);
+  calls.push(['init', m[1], password]);
+  const ok = SERVERS[m[1]].password === password;
+  const body = ok ? { status: 'ok', data: { token: `tok@${m[1]}` } } : { status: 'error', reason: 'invalid-password' };
+  return new Response(JSON.stringify(body), { status: ok ? 200 : 400, headers: { 'Content-Type': 'application/json' } });
+};
 api.init = async ({ serverURL, password }) => {
-  calls.push(['init', serverURL, password]);
   server = serverURL;
-  if (SERVERS[serverURL]?.password !== password) throw new Error(`Authentication failed on ${serverURL}`);
+  if (password) {
+    calls.push(['init', serverURL, password]);
+    if (SERVERS[serverURL]?.password !== password) throw new Error(`Authentication failed on ${serverURL}`);
+  }
   live = true;
   return lib;
 };
@@ -46,6 +61,7 @@ api.init = async ({ serverURL, password }) => {
 // syncing it and keeps the login (#571 follow-up: a syncing close broke a stale local copy).
 const lib = {
   send: async (name) => {
+    if (name === 'subscribe-set-token') return;
     if (name !== 'close-budget') throw new Error(`stub lib.send: unexpected ${name}`);
     if (loaded) { calls.push(['close']); loaded = null; }
     return 'ok';

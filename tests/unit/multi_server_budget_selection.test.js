@@ -43,30 +43,76 @@ const SERVERS = {
 const apiMod = await import('@actual-app/api');
 const api = apiMod.default || apiMod;
 
-let server = null;   // the server the singleton is logged in to
+let server = null;   // the server the singleton points at
+let token = null;    // the session token it sends there (upstream's "user-token")
 let live = false;    // upstream's `internal`: set by a successful init, cleared by shutdown
 let loaded = null;   // the budget the singleton holds
 const calls = [];    // ['init', url, password] | ['close'] | ['shutdown'] | ['download', id]
 
 let holdLogin = null; // case 16: a promise the next login waits on, to make it outlive its bound
 let holdClose = null; // case 17: the same for the next close of an open budget
-api.init = async ({ serverURL, password }) => {
-  // The password is recorded too: "credentials never cross servers" (case 14) and the mutation
-  // that swaps in ACTUAL_PASSWORD are only checkable if a row can see it.
+let deafLogin = 0;     // case 22: the next login ignores its abort signal and answers after this many ms
+let holdToken = null;  // case 23: a promise the next `subscribe-set-token` waits on
+const tokenSets = []; // every `subscribe-set-token`, kept out of `calls` so the exact sequences stay as they read
+
+// The fake servers' one network endpoint, POST <server>/account/login. Recorded as 'init' because
+// a login is what every row asserts: the password is recorded too, since "credentials never cross
+// servers" (case 14) and the mutation that swaps in ACTUAL_PASSWORD are only checkable if a row can
+// see it. An abort (the #574 login passes a signal) rejects the held request, as a real fetch does.
+const login = async (serverURL, password, signal) => {
   calls.push(['init', serverURL, password]);
-  if (holdLogin) { const h = holdLogin; holdLogin = null; await h; calls.push(['landed', serverURL]); }
-  // Upstream's init points the client at the server BEFORE it signs in, so a failed sign-in
-  // leaves it on the new server with nothing proven (case 9 depends on this).
+  if (deafLogin) {
+    const ms = deafLogin; deafLogin = 0;
+    await new Promise((res) => setTimeout(res, ms));
+    calls.push(['answered', serverURL]);
+  }
+  if (holdLogin) {
+    const h = holdLogin; holdLogin = null;
+    await new Promise((resolve, reject) => {
+      h.then(resolve);
+      signal?.addEventListener('abort', () => {
+        calls.push(['aborted', serverURL]);
+        reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }));
+      });
+    });
+    calls.push(['landed', serverURL]);
+  }
+  return SERVERS[serverURL]?.password === password ? { token: `tok@${serverURL}` } : { error: 'invalid-password' };
+};
+// #574: the login reaches the server over fetch, outside the singleton.
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (url, opts = {}) => {
+  const m = /^(.*)\/account\/login$/.exec(String(url));
+  if (!m || !SERVERS[m[1]]) return realFetch(url, opts);
+  const r = await login(m[1], JSON.parse(opts.body).password, opts.signal);
+  const body = r.token ? { status: 'ok', data: { token: r.token } } : { status: 'error', reason: r.error };
+  return new Response(JSON.stringify(body), { status: r.token ? 200 : 400, headers: { 'Content-Type': 'application/json' } });
+};
+api.init = async ({ serverURL, password }) => {
+  // Upstream's init points the client at the server BEFORE it signs in (case 9), and its sign-in
+  // stores the token only when the answer arrives: a late answer writes it under whatever server
+  // the client points at by then.
+  // Every init resets upstream's in-memory store (`init$3({ persist: false })`), token included,
+  // and signs in only on a truthy password; #574's multi-login path passes `password: ''`.
   server = serverURL;
-  if (SERVERS[serverURL]?.password !== password) throw new Error(`Authentication failed on ${serverURL}`);
+  token = null;
+  if (password) {
+    const r = await login(serverURL, password);
+    if (r.error) throw new Error(`Authentication failed: ${r.error}`);
+    token = r.token;
+  }
   live = true;
   return lib;
 };
 // Upstream's init returns its handler object, and `close-budget` closes the open budget WITHOUT
 // syncing it and without dropping the login. Recorded only when a budget is open, so the rows
-// read like the close they assert.
+// read like the close they assert. `subscribe-set-token` stores a token without any request.
 const lib = {
-  send: async (name) => {
+  send: async (name, args) => {
+    if (name === 'subscribe-set-token') {
+      if (holdToken) { const h = holdToken; holdToken = null; await h; }
+      tokenSets.push(`${args.token} on ${server}`); token = args.token; return;
+    }
     if (name !== 'close-budget') throw new Error(`stub lib.send: unexpected ${name}`);
     if (!loaded) return 'ok';
     calls.push(['close']);
@@ -93,7 +139,12 @@ api.downloadBudget = async (id) => {
 };
 api.getBudgetMonths = async () => { if (!loaded) throw { type: 'APIError', message: 'No budget file is open' }; return ['2026-01']; };
 let lastReadServer = null; // the server the singleton was logged in to at the last read
-api.getAccounts = async () => { lastReadServer = server; return [{ id: `acct-in-${loaded}`, name: `acct-in-${loaded}` }]; };
+const crossedTokens = [];  // case 14: reads sent with another server's token
+api.getAccounts = async () => {
+  lastReadServer = server;
+  if (token !== `tok@${server}`) crossedTokens.push(`${token} on ${server}`);
+  return [{ id: `acct-in-${loaded}`, name: `acct-in-${loaded}` }];
+};
 
 const adapter = (await import('../../dist/src/lib/actual-adapter.js')).default;
 const adapterNamed = await import('../../dist/src/lib/actual-adapter.js');
@@ -307,12 +358,12 @@ describe('(13) an unknown login never passes the precondition');
 }
 
 // ---------------------------------------------------------------------------
-describe('(16) a login that times out keeps running: the next operation waits for it to settle');
+describe('(16) #574: a login that times out is aborted, and its late answer writes nothing');
 {
-  // withOpTimeout races and does not cancel, so Alice's timed-out login to Y lands AFTER her call
-  // has failed and released the lock. If Bob's login to X ran first, that late landing would
-  // re-point the client to Y underneath Bob's read. The abandoned login is registered with the
-  // #393 registry, so Bob's lock acquisition settles it before his own login.
+  // Before #574, withOpTimeout raced the login and did not cancel it, so the timed-out login to Y
+  // landed after Alice's call had failed, and Bob's call had to wait for it (the #393 registry)
+  // or it would re-point the client under his read. Now the login is our own fetch, aborted at
+  // the bound: nothing is left running, so nothing has to be waited for.
   await accountsIn('sess-bob', 'bob'); // singleton on X with Alpha
   let release;
   holdLogin = new Promise((res) => { release = res; });
@@ -320,18 +371,18 @@ describe('(16) a login that times out keeps running: the next operation waits fo
   check(/timed out/.test(String(failed)), `Alice's read failed on the stalled login (got ${failed})`);
 
   const mark = calls.length;
-  setTimeout(release, 100); // lands while Bob's call is already waiting for the lock
+  setTimeout(release, 100); // an answer from Y arriving while Bob's call runs
   lastReadServer = null;
   const got = await accountsIn('sess-bob', 'bob');
+  await new Promise((res) => setTimeout(res, 150));
   const seq = since(mark);
   check(got === 'acct-in-alpha-sync' && lastReadServer === 'http://x:5006',
     `Bob read Alpha on X (got ${got} on ${lastReadServer})`);
-  check(seq.indexOf('landed:http://y:5006') >= 0 && seq.indexOf('landed:http://y:5006') < seq.indexOf('init:http://x:5006'),
-    `the abandoned login to Y settled before Bob logged in to X (got "${seq}")`);
+  check(calls.slice(0, mark).some(c => c.join(':') === 'aborted:http://y:5006') && !seq.includes('landed'),
+    `the timed-out login to Y was aborted and never landed (got "${seq}")`);
   check(server === 'http://x:5006', `nothing re-pointed the client after Bob's read (on ${server})`);
 
-  // Negative: the late landing recorded nothing, so Alice's next call logs in to Y again rather
-  // than trusting a login no caller was waiting for.
+  // Negative: the aborted login recorded nothing, so Alice's next call logs in to Y again.
   const mark2 = calls.length;
   const back = await accountsIn('sess-alice', 'alice');
   check(back === 'acct-in-gamma-sync' && since(mark2).includes('init:http://y:5006:pw-gamma'),
@@ -368,6 +419,89 @@ describe('(17) a close that times out keeps running: the next operation waits fo
   const back = await accountsIn('sess-alice', 'alice');
   check(back === 'acct-in-gamma-sync' && since(mark2).includes('init:http://y:5006:pw-gamma'),
     `Alice recovered with a fresh login to Y (got ${back}, "${since(mark2)}")`);
+}
+
+// ---------------------------------------------------------------------------
+describe('(21) #574: a login that stalls is abandoned at its bound, and the next operation does not wait for it');
+{
+  // Before #574 the stalled login kept running after its timeout, so the next operation had to
+  // wait for it (case 16) and, when it never answered, waited out the whole #393 bound for an
+  // unrelated server. A login aborted at its bound has nothing left to wait for.
+  await accountsIn('sess-bob', 'bob'); // singleton on X with Alpha
+  let release;
+  holdLogin = new Promise((res) => { release = res; });
+  const failed = await accountsIn('sess-alice', 'alice');
+  check(/timed out/.test(String(failed)), `Alice's read failed on the stalled login (got ${failed})`);
+
+  const mark = calls.length;
+  const t0 = Date.now();
+  lastReadServer = null;
+  const got = await accountsIn('sess-bob', 'bob');
+  const ms = Date.now() - t0;
+  check(got === 'acct-in-alpha-sync' && lastReadServer === 'http://x:5006',
+    `Bob read Alpha on X (got ${got} on ${lastReadServer})`);
+  check(ms < 300, `Bob did not wait for Y's stalled login (took ${ms}ms against a 400ms bound)`);
+
+  // Negative: the stalled request was aborted, so an answer arriving now writes nothing.
+  release();
+  await new Promise((res) => setTimeout(res, 20));
+  check(!since(mark).includes('landed'), `the abandoned login never landed (got "${since(mark)}")`);
+  check(server === 'http://x:5006' && token === 'tok@http://x:5006',
+    `nothing re-pointed the client or replaced its token (on ${server} with ${token})`);
+  const mark2 = calls.length;
+  const back = await accountsIn('sess-alice', 'alice');
+  check(back === 'acct-in-gamma-sync' && since(mark2).includes('init:http://y:5006:pw-gamma'),
+    `Alice recovered with a fresh login to Y (got ${back}, "${since(mark2)}")`);
+}
+
+// ---------------------------------------------------------------------------
+describe('(22) #574: a login answer the abort did not stop changes nothing');
+{
+  // A server (or proxy) can answer after the abort anyway; here the fetch ignores its signal and
+  // answers with a valid token 500ms after the 400ms bound. Pointing the client and storing the
+  // token run only in the continuation of the awaited bounded call, which the timeout has already
+  // rejected, so the late token is dropped. Row 21 cannot see a regression here: its stub rejects
+  // on abort, so code that reacts to the late answer never runs there.
+  await accountsIn('sess-bob', 'bob'); // singleton on X with Alpha
+  const setsBefore = tokenSets.length;
+  deafLogin = 900;
+  const failed = await accountsIn('sess-alice', 'alice');
+  check(/timed out/.test(String(failed)), `Alice's read failed on the bound (got ${failed})`);
+  const mark = calls.length;
+  const t0 = Date.now();
+  const got = await accountsIn('sess-bob', 'bob');
+  const ms = Date.now() - t0;
+  await new Promise((res) => setTimeout(res, 900)); // past the late answer plus the bound
+  check(got === 'acct-in-alpha-sync', `Bob read Alpha (got ${got})`);
+  // A login left registered with the #393 registry would make Bob wait for the deaf answer.
+  check(ms < 300, `Bob did not wait for the unanswered login (took ${ms}ms)`);
+  check(since(mark).includes('answered:http://y:5006'), `Y did answer late (got "${since(mark)}")`);
+  const ySets = tokenSets.slice(setsBefore).filter(t => t.includes('http://y:5006'));
+  check(ySets.length === 0, `no token was stored for Y (got ${JSON.stringify(ySets)})`);
+  check(server === 'http://x:5006' && token === 'tok@http://x:5006',
+    `the client still points at X with X's token (on ${server} with ${token})`);
+}
+
+// ---------------------------------------------------------------------------
+describe('(23) #574: a token store that stalls is bounded, and the next operation ends on its own server');
+{
+  // `subscribe-set-token` is local, but it is awaited under the api lock: unbounded, a stall would
+  // hold the lock forever (#270). Raced and registered like the init, it fails Alice at the bound,
+  // and Bob waits for it to settle before re-pointing, so its late write cannot outlive his init.
+  await accountsIn('sess-bob', 'bob'); // singleton on X with Alpha
+  let release;
+  holdToken = new Promise((res) => { release = res; });
+  const failed = await Promise.race([
+    accountsIn('sess-alice', 'alice'),
+    new Promise((res) => setTimeout(() => res('HUNG past 2000ms'), 2000)),
+  ]);
+  check(/timed out/.test(String(failed)), `Alice's read failed at the bound (got ${failed})`);
+  setTimeout(release, 50);
+  const got = await accountsIn('sess-bob', 'bob');
+  await new Promise((res) => setTimeout(res, 100)); // past the release, so a late write has landed
+  check(got === 'acct-in-alpha-sync', `Bob read Alpha (got ${got})`);
+  check(server === 'http://x:5006' && token === 'tok@http://x:5006',
+    `the client points at X with X's token (on ${server} with ${token})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +588,7 @@ describe('(14) credentials never cross servers, over every row above');
   const crossed = calls.filter(c => c[0] === 'init' && c[2] !== { 'http://x:5006': 'pw-x', 'http://y:5006': 'pw-gamma' }[c[1]]);
   check(calls.filter(c => c[0] === 'init').length > 10, 'the rows above produced logins to check');
   check(crossed.length === 0, `every login paired a server with its own password (crossed: ${JSON.stringify(crossed)})`);
+  check(crossedTokens.length === 0, `every read carried its own server's token (crossed: ${JSON.stringify(crossedTokens)})`);
 }
 
 // ---------------------------------------------------------------------------

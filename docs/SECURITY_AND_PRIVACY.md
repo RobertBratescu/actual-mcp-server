@@ -663,6 +663,7 @@ MCP_HTTPS_KEY=/app/certs/key.pem
 **Security**:
 - ⚠️ Often unencrypted (local deployment)
 - ✅ Password transmitted securely via `@actual-app/api`
+- ✅ With more than one configured login (#574), the server POSTs the password to the configured server's `/account/login` itself, so a stalled login can be aborted; it refuses redirects, so the password never follows one to another host
 - ✅ Can use HTTPS if Actual Budget server supports it
 
 **Recommendation**: Deploy Actual Budget and MCP server on same network/host
