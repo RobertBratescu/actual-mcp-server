@@ -26,11 +26,12 @@ Premortem: the phase is over and it failed badly. What happened?
 Not binding. In order:
 
 1. #584 first: it is a one-line shape fix with a red row, and it makes #583's negative cases cover groups as well.
-2. #583: a distinct unreadable outcome from `findResidue`, mapped to a nonzero exit in the runner and in `scripts/assert-no-residue.mjs`.
-3. One full dual-transport run, then release.
+2. #585, found while sizing the #584 backlog: `rules.js` never deletes its #342 stage rule, so 192 marker rules had piled up unseen. With #584 in, every full run would fail on it. It ships in the same release; the first full run clears the backlog once with an `MCP_TEST_SWEEP_MAX` override.
+3. #583: a distinct unreadable outcome from `findResidue`, mapped to a nonzero exit in the runner and in `scripts/assert-no-residue.mjs`.
+4. One full dual-transport run, then release.
 
 ## Out of scope
 
 - Session admission hardening (#581, #577): the next phase.
 - @actual-app/api 26.11.0 and #479, #548: Actual API 26.11 adoption.
-- Any change to what the integration modules create, or to their own cleanup.
+- Any change to what the integration modules create, or to their own cleanup, beyond #585 (a leak the phase's own fix exposed).

@@ -67,6 +67,24 @@ export function isTestRule(rule) {
 }
 
 const list = (x) => (Array.isArray(x) ? x : Array.isArray(x?.result) ? x.result : []);
+
+// #584: three legacy listing tools return their array under their own key, and both test
+// clients pass that shape through unchanged (unwrapToolResult strips only `result`). Reading
+// them through `list` alone saw `[]`, so a leaked group, schedule or rule was invisible to the
+// sweep and to the zero-residue assertion. A key is read only from the tool that returns it.
+const LISTING_KEY = {
+  actual_category_groups_get: 'groups',
+  actual_rules_get: 'rules',
+  actual_schedules_get: 'schedules',
+};
+
+/** The array a listing tool returned, or null when its reply is not a listing. */
+function readListing(tool, x) {
+  if (Array.isArray(x)) return x;
+  if (Array.isArray(x?.result)) return x.result;
+  const key = LISTING_KEY[tool];
+  return key && Array.isArray(x?.[key]) ? x[key] : null;
+}
 const redact = (id) => (typeof id === 'string' && id.length > 8 ? `${id.slice(0, 8)}...` : String(id));
 
 /**
@@ -106,18 +124,19 @@ export function assertSweepAllowed(env = process.env) {
 
 /** Collect everything that looks like test residue, without deleting anything. */
 export async function findResidue(callTool) {
+  const listing = (tool) => callTool(tool, {}).then((x) => readListing(tool, x) ?? []).catch(() => []);
   const [accounts, payees, categories, groups, rules, schedules, tags] = await Promise.all([
-    callTool('actual_accounts_list', {}).then(list).catch(() => []),
-    callTool('actual_payees_get', {}).then(list).catch(() => []),
-    callTool('actual_categories_get', {}).then(list).catch(() => []),
-    callTool('actual_category_groups_get', {}).then(list).catch(() => []),
-    callTool('actual_rules_get', {}).then(list).catch(() => []),
-    callTool('actual_schedules_get', {}).then(list).catch(() => []),
+    listing('actual_accounts_list'),
+    listing('actual_payees_get'),
+    listing('actual_categories_get'),
+    listing('actual_category_groups_get'),
+    listing('actual_rules_get'),
+    listing('actual_schedules_get'),
     // #451: tags. Added with the tags integration module, because a fixture the sweep cannot
     // see is a fixture the zero-residue assertion silently certifies as absent. tags.js deletes
     // its own tag in a `finally`, but a run killed by the wall-clock guard or by an open circuit
     // breaker never reaches it, and the next run would then inherit an invisible leftover.
-    callTool('actual_tags_list', {}).then(list).catch(() => []),
+    listing('actual_tags_list'),
   ]);
 
   const named = (arr) => arr.filter((o) => isTestObjectName(o?.name));

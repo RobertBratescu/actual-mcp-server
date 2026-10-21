@@ -191,5 +191,59 @@ await checkAsync('TRANSFER PAYEES are never residue, no matter how test-shaped t
   assert.strictEqual(r.openAccounts.length, 0);
 });
 
+// #584: three legacy listing tools return their array under their own key, and the test clients
+// pass that through. The rows above all stub bare arrays, a shape the live server never sends
+// for these three, which is how the blind spot survived. These rows use the LIVE shapes.
+const LIVE_LEAKS = {
+  actual_category_groups_get: { groups: [{ id: 'g1', name: 'MCP-Leak-1761000000000' }] },
+  actual_rules_get: { rules: [{ id: 'r1', conditions: [{ value: 'MCP-Rule-x' }] }] },
+  actual_schedules_get: { schedules: [{ id: 's1', name: 'MCP-Schedule-1761000000000' }], count: 1 },
+};
+const stubFrom = (map) => async (tool) => (tool in map ? map[tool] : []);
+async function quietly(fn) {
+  const lines = [];
+  const orig = console.log;
+  console.log = (...a) => lines.push(a.join(' '));
+  try { return { value: await fn(), out: lines.join('\n') }; } finally { console.log = orig; }
+}
+
+await checkAsync('#584: a leaked group, rule and schedule in their LIVE shapes are counted and named', async () => {
+  const { assertNoResidue } = await import('../../tests/manual/residue.js');
+  const { value, out } = await quietly(() => assertNoResidue(stubFrom(LIVE_LEAKS)));
+  assert.strictEqual(value, 3, `expected 3 residue objects, got ${value}`);
+  for (const name of ['MCP-Leak-1761000000000', 'MCP-Schedule-1761000000000', 'r1']) {
+    assert.ok(out.includes(name), `the failure listing must name ${name}, got:\n${out}`);
+  }
+});
+
+await checkAsync('#584: human objects in the same live shapes are never counted', async () => {
+  const { assertNoResidue } = await import('../../tests/manual/residue.js');
+  const { value } = await quietly(() => assertNoResidue(stubFrom({
+    actual_category_groups_get: { groups: [{ id: 'g2', name: 'Bills' }] },
+    actual_rules_get: { rules: [{ id: 'r2', conditions: [{ value: 'Amazon' }] }] },
+    actual_schedules_get: { schedules: [{ id: 's2', name: 'Rent' }], count: 1 },
+  })));
+  assert.strictEqual(value, 0);
+});
+
+await checkAsync('#584: the existing `result` and bare-array shapes still count', async () => {
+  const { assertNoResidue } = await import('../../tests/manual/residue.js');
+  const { value } = await quietly(() => assertNoResidue(stubFrom({
+    actual_payees_get: { result: [{ id: 'p1', name: 'MCP-Payee-1761000000000' }] },
+    actual_categories_get: [{ id: 'c1', name: 'MCP-Cat-1761000000000' }],
+  })));
+  assert.strictEqual(value, 2);
+});
+
+await checkAsync('#584: a listing key is read only from the tool that returns it', async () => {
+  const { assertNoResidue } = await import('../../tests/manual/residue.js');
+  const { value } = await quietly(() => assertNoResidue(stubFrom({
+    actual_rules_get: LIVE_LEAKS.actual_rules_get,
+    // `rules` from the payees tool is not a payee listing; reading it would count a phantom.
+    actual_payees_get: { rules: [{ id: 'x', name: 'MCP-Payee-1761000000000' }] },
+  })));
+  assert.strictEqual(value, 1, 'only the rule counts');
+});
+
 console.log(`\n[residue-pattern] Results: ${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

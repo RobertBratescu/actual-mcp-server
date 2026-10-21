@@ -213,5 +213,45 @@ await check('the sweep preview names the tag it is about to delete', async () =>
   assert.ok(output.includes(TAG), `the preview must name the tag it will delete, got:\n${output}`);
 });
 
+// #584: groups, rules and schedules arrive in their own keys from the live tools. With the old
+// reader the sweep saw none of them and printed "already clean". Assert the exact deletes and
+// their order: rules and schedules before categories, categories before their group.
+await check('#584: sweeps a live-shape rule, schedule and group, in dependency order', async () => {
+  const { callTool, calls } = makeMock({
+    actual_accounts_list: () => ({ result: [] }),
+    actual_categories_get: () => ({ result: [{ id: 'c1', name: 'MCP-Cat-1761000000000' }] }),
+    actual_category_groups_get: () => ({ groups: [{ id: 'g1', name: 'MCP-Leak-1761000000000' }] }),
+    actual_rules_get: () => ({ rules: [{ id: 'r1', conditions: [{ value: 'MCP-Rule-x' }] }] }),
+    actual_schedules_get: () => ({ schedules: [{ id: 's1', name: 'MCP-Schedule-1761000000000' }], count: 1 }),
+  });
+  const origLog = console.log;
+  console.log = () => {};
+  let res;
+  try { res = await sweepResidue(callTool, ENV); } finally { console.log = origLog; }
+  const deletes = calls.filter((c) => /_delete$/.test(c.name)).map((c) => `${c.name} ${c.args.id}`);
+  assert.deepStrictEqual(deletes, [
+    'actual_rules_delete r1',
+    'actual_schedules_delete s1',
+    'actual_categories_delete c1',
+    'actual_category_groups_delete g1',
+  ]);
+  assert.deepStrictEqual(res, { swept: 4, failed: 0, skipped: false });
+});
+
+await check('#584: never deletes a human group, schedule or unmarked rule in the live shapes', async () => {
+  const { callTool, calls } = makeMock({
+    actual_accounts_list: () => ({ result: [] }),
+    actual_category_groups_get: () => ({ groups: [{ id: 'g2', name: 'Bills' }] }),
+    actual_rules_get: () => ({ rules: [{ id: 'r2', conditions: [{ value: 'Amazon' }] }] }),
+    actual_schedules_get: () => ({ schedules: [{ id: 's2', name: 'Rent' }], count: 1 }),
+  });
+  const lines = [];
+  const origLog = console.log;
+  console.log = (...a) => lines.push(a.join(' '));
+  try { await sweepResidue(callTool, ENV); } finally { console.log = origLog; }
+  assert.ok(!calls.some((c) => /_delete$|_close$/.test(c.name)), 'no destructive call was made');
+  assert.ok(/already clean/.test(lines.join('\n')));
+});
+
 console.log(`\n[residue-sweep-balance-account] Results: ${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
