@@ -90,10 +90,12 @@ The zero-residue assertion in the release gate can certify a budget it never rea
 Outcome (2026-10-21): done. Shipped in v0.23.4 after two consecutive green full dual-transport runs with zero residue. #584 made the groups, rules and schedules listings readable in their live shapes; #583 made an unreadable listing exit 1 ("could not check") instead of counting as empty, by shape and per tool, never by message text. One ticket appeared that the plan did not expect: #585, the rules module never deleted its #342 stage rule, so 192 rules had piled up unseen until #584 made rules visible. It shipped in the same release, and the first full run cleared the 197-object backlog once with `MCP_TEST_SWEEP_MAX=250`; the second run, at the default cap, found every pre-run sweep already clean. Nothing was skipped and no ticket moved.
 
 ## Phase: Session admission hardening
-state: open
+state: done
 plan: docs/plans/session-admission-hardening.md
 
 Concurrent initializes can exceed MAX_CONCURRENT_SESSIONS because admission is checked before a slot is reserved (#581), and one principal can fill the shared pool (#577, after #581). Since #572 several clients can share one server with their own tokens, which makes both reachable. It follows Residue check integrity so its release goes through a gate whose zero-residue claim is true.
+
+Outcome (2026-10-21): done. Shipped in v0.24.0 after two consecutive green full dual-transport runs with zero residue. #581 reproduced first (6 parallel initializes at a cap of 2 all admitted on the old code) and now reserves a slot synchronously at initialize, released on every exit path. #577 added the opt-in `MAX_SESSIONS_PER_PRINCIPAL` on top of that reservation: it counts OIDC subjects and named static tokens, exempts the legacy shared token and unauthenticated requests by auth method, and its 503 names only the caller's own cap and count. No ticket appeared that the plan did not expect, nothing was skipped, and no ticket moved. The #581 gate hit the bad-fix trip wire after 3 rounds; the #577 review found one medium (a wrong variable name in the docs) and two lows, all fixed before the commit.
 
 ## Phase: Actual API 26.11 adoption
 state: planned
