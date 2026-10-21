@@ -36,10 +36,10 @@
  * every exit path (0, 1, 2, 3, 4) and on SIGINT/SIGTERM.
  */
 
-import { execFileSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { unwrapToolResult } from '../shared/mcp-protocol.js';
+import { stdioExecArgs, prepareStdioDataDir } from '../../scripts/lib/harness-stdio.mjs';
 
 const DEFAULT_MAX_RETRIES = parseInt(process.env.MCP_TEST_MAX_RETRIES || '5', 10);
 const CIRCUIT_BREAKER_THRESHOLD = parseInt(process.env.MCP_TEST_CIRCUIT_THRESHOLD || '10', 10);
@@ -72,29 +72,12 @@ export function createClient({ container, rl: _rl, retryPauseMs } = {}) {
   }
 
   async function connect() {
-    // Pre-create the isolated data dir as `app`. The server mkdirs it on some paths, but the
-    // adapter's legacy init `scandir`s it first, so an absent dir surfaces as ENOENT.
-    try {
-      execFileSync('docker', ['exec', '-u', 'app', CONTAINER, 'mkdir', '-p', DATA_DIR], { stdio: 'ignore' });
-    } catch {
-      // Container not reachable yet; connect() will fail with a clearer error below.
-    }
-
-    // DATA-DIR ISOLATION (#280). Two @actual-app/api instances must never share one budget
-    // cache. `docker exec` inherits MCP_BRIDGE_DATA_DIR=/app/data, which is the directory the
-    // live HTTP server is already using, so the stdio pass would put a second writer on the
-    // same SQLite files. That is the documented data-dir contention, and it wedged this
-    // environment during development: a stale budget directory carrying the same cloudFileId
-    // then blocked every re-download until it was moved out of the data dir.
-    //
-    // -u app: `docker exec` defaults to ROOT while the server runs as `app` (uid 1001).
-    // Root-owned files inside the volume are unusable by the server afterwards.
-    const args = [
-      'exec', '-i',
-      '-u', 'app',
-      '-e', `MCP_BRIDGE_DATA_DIR=${DATA_DIR}`,
-      CONTAINER, 'node', 'dist/src/index.js', '--stdio',
-    ];
+    // DATA-DIR ISOLATION (#280, #575). Two @actual-app/api instances must never share one
+    // budget cache: `docker exec` inherits MCP_BRIDGE_DATA_DIR=/app/data, the live HTTP
+    // server's dir, and runs as root. The helper gives this process its own dir as `app`;
+    // its header has the reproduction.
+    prepareStdioDataDir(CONTAINER, DATA_DIR);
+    const args = stdioExecArgs({ container: CONTAINER, dataDir: DATA_DIR });
     transport = new StdioClientTransport({ command: 'docker', args });
     client = new Client({ name: 'actual-mcp-test-client', version: '1.0.0' }, { capabilities: {} });
     await client.connect(transport);

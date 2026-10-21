@@ -246,6 +246,8 @@ The `/app/data` volume (the container's canonical data dir, `MCP_BRIDGE_DATA_DIR
 
 > Even if Actual Budget and actual-mcp run on the same machine, actual-mcp needs **its own separate `/app/data` folder**: it must not share the Actual Budget data directory.
 
+> **One process per data dir.** Never run a second actual-mcp process, for example `docker exec <container> node dist/src/index.js --stdio`, on a running server's `MCP_BRIDGE_DATA_DIR`, and never point two containers at one data folder. Each process keeps its own local copy of the budget and syncs it; a second writer leaves the other with a stale copy, and its next sync breaks every later session open with `out_of_sync` until that budget's local copy is moved out of the data dir. Give the second process its own dir with `-e MCP_BRIDGE_DATA_DIR=<another path>` (and `-u app` with `docker exec`, so it does not leave root-owned files behind). Pick a path the `app` user can write: a subdirectory of the data volume such as `/app/data/stdio` is persistent and isolated, while `/app` itself is root-owned, so a path like `/app/stdio-data` fails at startup. See #575.
+
 This architecture also means actual-mcp and Actual Budget do **not** need to run on the same machine. You can have:
 - Actual Budget running on Server A
 - actual-mcp running on Server B (or a VPS, or a Raspberry Pi)

@@ -23,6 +23,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { deleteOwnObjects } from './lib/harness-cleanup.mjs';
+import { stdioExecArgs, prepareStdioDataDir } from './lib/harness-stdio.mjs';
 const pexec = promisify(execFile);
 
 const ACTUAL_CTR = process.env.REGRESSION_ACTUAL_CTR || 'finance-actual-budget-main';
@@ -38,9 +39,13 @@ const runNetshoot = (args) => pexec('docker', ['run', '--rm', '--net', `containe
 async function netemBlackhole() { await runNetshoot(['qdisc', 'add', 'dev', 'eth0', 'root', 'netem', 'loss', '100%']); netemApplied = true; }
 async function netemClear() { if (!netemApplied) return; try { await runNetshoot(['qdisc', 'del', 'dev', 'eth0', 'root']); } catch { /* already gone */ } netemApplied = false; }
 
+// #575: its own data dir as `app`. On the HTTP server's /app/data this process was a
+// second writer whose stale copy broke every later session open (out_of_sync).
+const DATA_DIR = '/tmp/mcp-reg270-data';
+prepareStdioDataDir(MCP_CTR, DATA_DIR);
 const transport = new StdioClientTransport({
   command: 'docker',
-  args: ['exec', '-i', '-e', `ACTUAL_OP_TIMEOUT_MS=${OP_TIMEOUT_MS}`, MCP_CTR, 'node', 'dist/src/index.js', '--stdio'],
+  args: stdioExecArgs({ container: MCP_CTR, dataDir: DATA_DIR, env: { ACTUAL_OP_TIMEOUT_MS: OP_TIMEOUT_MS } }),
   stderr: 'ignore',
 });
 const client = new Client({ name: 'regression-270', version: '1.0.0' }, { capabilities: {} });
@@ -61,8 +66,24 @@ async function getGroupId() {
   return JSON.parse(textOf(created) || '{}').groupId;
 }
 
+// #575: the own data dir starts empty on every recreated container, so the first op
+// downloads the whole budget, which outlasts the deliberately low OP_TIMEOUT_MS. The
+// abandoned download finishes in the background; retry a read until it answers, BEFORE
+// T0, so the stall check still runs under the low timeout. Raising the timeout instead
+// would weaken the bound the regression asserts.
+async function warmUp(attempts = 12, pauseMs = 5000) {
+  for (let i = 1; i <= attempts; i++) {
+    const r = await client.callTool({ name: 'actual_category_groups_get', arguments: {} });
+    if (!r.isError) return;
+    console.log(`  warm-up ${i}/${attempts}: budget not loaded yet (${textOf(r).slice(0, 120)})`);
+    await new Promise((res) => setTimeout(res, pauseMs));
+  }
+  throw new Error(`budget did not load into ${DATA_DIR} after ${attempts} attempts`);
+}
+
 async function main() {
   await client.connect(transport);
+  await warmUp();
   T0 = now();
   const groupId = await getGroupId();
   if (!groupId) throw new Error('could not obtain a category group id');

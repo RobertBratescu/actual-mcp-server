@@ -14,8 +14,11 @@
 // Exit codes: 0 = pass, 1 = fail (so the pipeline can gate on it).
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { stdioExecArgs, prepareStdioDataDir } from './lib/harness-stdio.mjs';
 
 const CONTAINER = process.env.MCP_STDIO_CONTAINER || 'actual-mcp-bearer-backend';
+// #575: its own data dir, never the HTTP server's /app/data.
+const DATA_DIR = '/tmp/mcp-stdio-smoke-data';
 const EXPECTED = process.env.EXPECTED_TOOL_COUNT ? Number(process.env.EXPECTED_TOOL_COUNT) : null;
 const TIMEOUT_MS = Number(process.env.MCP_STDIO_SMOKE_TIMEOUT_MS || 60000);
 
@@ -25,9 +28,10 @@ const fail = (msg) => {
 };
 
 // Buffer the server's (noisy) stderr and only surface it if something breaks.
+prepareStdioDataDir(CONTAINER, DATA_DIR);
 const transport = new StdioClientTransport({
   command: 'docker',
-  args: ['exec', '-i', CONTAINER, 'node', 'dist/src/index.js', '--stdio'],
+  args: stdioExecArgs({ container: CONTAINER, dataDir: DATA_DIR }),
   stderr: 'pipe',
 });
 let serverStderr = '';
