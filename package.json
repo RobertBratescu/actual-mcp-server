@@ -71,14 +71,14 @@
     "@actual-app/api": "^26.10.0",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "debug": "^4.4.3",
-    "dotenv": "^18.0.6",
+    "dotenv": "^18.0.8",
     "express": "^5.3.0",
     "fuse.js": "^7.4.2",
     "jose": "^6.2.12",
     "mcp-auth": "^0.2.0",
     "winston": "^3.18.3",
     "winston-daily-rotate-file": "^5.0.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
     "prom-client": "*"
@@ -86,7 +86,7 @@
   "devDependencies": {
     "@playwright/test": "^1.63.0",
     "@types/express": "^5.0.3",
-    "@types/node": "^26.6.4",
+    "@types/node": "^26.6.5",
     "knip": "^6.41.0",
     "node-fetch": "^3.3.2",
     "tsconfig-paths": "^4.2.0",
