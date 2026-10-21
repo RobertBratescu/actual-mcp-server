@@ -236,13 +236,16 @@ await checkAsync('#584: the existing `result` and bare-array shapes still count'
 });
 
 await checkAsync('#584: a listing key is read only from the tool that returns it', async () => {
-  const { assertNoResidue } = await import('../../tests/manual/residue.js');
-  const { value } = await quietly(() => assertNoResidue(stubFrom({
+  const { findResidue, residueCount } = await import('../../tests/manual/residue.js');
+  const { value } = await quietly(() => findResidue(stubFrom({
     actual_rules_get: LIVE_LEAKS.actual_rules_get,
     // `rules` from the payees tool is not a payee listing; reading it would count a phantom.
+    // Since #583 it is reported unreadable instead (assertNoResidue then refuses to certify).
     actual_payees_get: { rules: [{ id: 'x', name: 'MCP-Payee-1761000000000' }] },
   })));
-  assert.strictEqual(value, 1, 'only the rule counts');
+  assert.strictEqual(residueCount(value), 1, 'only the rule counts');
+  assert.deepStrictEqual(value.payees, [], 'no phantom payee');
+  assert.deepStrictEqual(value.unreadable, ['actual_payees_get']);
 });
 
 console.log(`\n[residue-pattern] Results: ${passed} passed, ${failed} failed`);

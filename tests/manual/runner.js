@@ -33,7 +33,7 @@ import { config as loadDotenv } from 'dotenv';
 
 import { createClient } from './mcp-client.js';
 import { createClient as createStdioClient } from './mcp-client-stdio.js';
-import { sweepResidue, assertNoResidue, EXIT_RESIDUE, EXIT_UNSAFE_BUDGET } from './residue.js';
+import { sweepResidue, assertNoResidue, ResidueUnreadableError, EXIT_RESIDUE, EXIT_UNSAFE_BUDGET } from './residue.js';
 import { fail, failureCount, failureList } from './assert.js';
 import { sanityTests } from './tests/sanity.js';
 import { smokeTests } from './tests/smoke.js';
@@ -334,10 +334,20 @@ export async function run() {
     // precedence. A failed assertion (exit 1) is the primary signal and wins the exit code,
     // but the residue leak is still reported. Exit 2 (runtime budget) and exit 4 (unsafe
     // budget) fire earlier where they already do and are unchanged.
+    // #583: a listing that could not be read means the budget was not checked. That is its own
+    // verdict (exit 1), folded in here so the failed-assertion ledger is still printed; any
+    // other error still reaches the outer catch.
     let residue = 0;
+    let unreadable = null;
     if (['normal', 'extended', 'full'].includes(level)) {
       console.log("\n--- Post-run zero-residue assertion ---");
-      residue = await assertNoResidue(client.callTool);
+      try {
+        residue = await assertNoResidue(client.callTool);
+      } catch (err) {
+        if (!(err instanceof ResidueUnreadableError)) throw err;
+        unreadable = err;
+        console.error(`  ✗ ${err.message}`);
+      }
     }
 
     // #281: a failed assertion in any module now FAILS the run. Before this, modules printed
@@ -349,6 +359,17 @@ export async function run() {
       if (residue > 0) {
         console.error(`\n(Also: ${residue} test object(s) survived cleanup; see the residue verdict above.)`);
       }
+      if (unreadable) {
+        console.error(`\n(Also: the residue check could not read ${unreadable.tools.join(', ')}; see above.)`);
+      }
+      await teardown();
+      if (guard) guard.clear();
+      rl.close();
+      process.exit(1);
+    }
+
+    if (unreadable) {
+      console.error(`\n❌ The zero-residue assertion could not read ${unreadable.tools.join(', ')}. The budget was not checked, so this run cannot certify it clean; repeat the run.`);
       await teardown();
       if (guard) guard.clear();
       rl.close();

@@ -78,13 +78,30 @@ const LISTING_KEY = {
   actual_schedules_get: 'schedules',
 };
 
-/** The array a listing tool returned, or null when its reply is not a listing. */
+/**
+ * The array a listing tool returned, or null when its reply is not a listing.
+ *
+ * #583: null means UNREADABLE (error text, null, another object, a foreign key), never
+ * empty. Decided by shape, not message text, so a new error wording cannot read as clean.
+ */
 function readListing(tool, x) {
   if (Array.isArray(x)) return x;
   if (Array.isArray(x?.result)) return x.result;
   const key = LISTING_KEY[tool];
   return key && Array.isArray(x?.[key]) ? x[key] : null;
 }
+/**
+ * #583: a listing could not be read, so the budget was not checked and cannot be certified
+ * clean. Tested with instanceof; the tool names are in `tools`.
+ */
+export class ResidueUnreadableError extends Error {
+  constructor(tools) {
+    super(`Zero-residue assertion could not read ${tools.join(', ')}: the budget was not checked, so it cannot be certified clean.`);
+    this.name = 'ResidueUnreadableError';
+    this.tools = tools;
+  }
+}
+
 const redact = (id) => (typeof id === 'string' && id.length > 8 ? `${id.slice(0, 8)}...` : String(id));
 
 /**
@@ -122,9 +139,20 @@ export function assertSweepAllowed(env = process.env) {
   return 'allowed';
 }
 
-/** Collect everything that looks like test residue, without deleting anything. */
+/**
+ * Collect everything that looks like test residue, without deleting anything. Never throws:
+ * a listing that could not be read (#583) is named in `unreadable` and contributes nothing,
+ * so the best-effort sweep still removes what it could read and the assertion can refuse.
+ */
 export async function findResidue(callTool) {
-  const listing = (tool) => callTool(tool, {}).then((x) => readListing(tool, x) ?? []).catch(() => []);
+  const unreadable = [];
+  const listing = (tool) => callTool(tool, {})
+    .then((x) => readListing(tool, x))
+    .catch(() => null)
+    .then((arr) => {
+      if (arr === null) unreadable.push(tool);
+      return arr ?? [];
+    });
   const [accounts, payees, categories, groups, rules, schedules, tags] = await Promise.all([
     listing('actual_accounts_list'),
     listing('actual_payees_get'),
@@ -160,6 +188,7 @@ export async function findResidue(callTool) {
     rules: rules.filter(isTestRule),
     // A tag's word is in `tag`, not `name`, so it needs its own filter rather than `named()`.
     tags: tags.filter((t) => isTestObjectName(t?.tag)),
+    unreadable: unreadable.sort(),
   };
 }
 
@@ -180,8 +209,14 @@ export async function sweepResidue(callTool, env = process.env) {
 
   const found = await findResidue(callTool);
   const total = residueCount(found);
+  // #583: best effort. Sweep what could be read, but never call a budget clean when part of
+  // it was not read; the post-run assertion is the check, and it refuses.
+  if (found.unreadable.length > 0) {
+    console.log(`  ⚠ Sweep could not read ${found.unreadable.join(', ')}; anything there is left for this run's assertion to report.`);
+  }
   if (total === 0) {
-    console.log('  ✓ Sweep: budget already clean, nothing to remove.');
+    if (found.unreadable.length === 0) console.log('  ✓ Sweep: budget already clean, nothing to remove.');
+    else console.log('  ℹ Sweep: nothing to remove in the listings it could read.');
     return { swept: 0, failed: 0, skipped: false };
   }
 
@@ -268,10 +303,15 @@ export async function sweepResidue(callTool, env = process.env) {
  * maintainer reading the contract would conclude a stray tag does not fail the run, and the
  * first live tags run proves it does.
  *
+ * #583: an unreadable listing throws ResidueUnreadableError BEFORE anything is counted, so a
+ * partly read budget is neither certified clean nor reported as a residue count.
+ *
  * @returns {number} the residue count (0 = clean)
+ * @throws {ResidueUnreadableError} when any listing could not be read
  */
 export async function assertNoResidue(callTool) {
   const found = await findResidue(callTool);
+  if (found.unreadable.length > 0) throw new ResidueUnreadableError(found.unreadable);
   const total = residueCount(found);
 
   if (found.closedAccounts.length > 0) {
