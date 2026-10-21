@@ -81,11 +81,23 @@ Phase 1 exists because our own release gate is the second writer: the full run's
 
 Outcome (2026-10-21): done. All four planned tickets shipped in v0.23.3 after two consecutive green full dual-transport runs with zero residue: #576, #575 (harness stdio servers now run as `app` on their own data dir, pinned by `tests/unit/harness_stdio_data_dir.test.js`), #579 and #580. One change of shape: a fresh harness data dir has to download the budget before the #270 stall step, so that step now warms up first. Two defects in the zero-residue assertion itself surfaced during the phase and went to Backlog rather than extending it: #583 (a failed listing counts as empty) and #584 (category groups are never checked).
 
+## Phase: Residue check integrity
+state: open
+plan: docs/plans/residue-check-integrity.md
+
+The zero-residue assertion in the release gate can certify a budget it never read (#583) and never sees category groups (#584), both found while closing Shared data dir and gate hygiene. It comes first, ahead of Session admission hardening and Actual API 26.11 adoption, because every later phase releases through this gate.
+
+## Phase: Session admission hardening
+state: planned
+plan:
+
+Concurrent initializes can exceed MAX_CONCURRENT_SESSIONS because admission is checked before a slot is reserved (#581), and one principal can fill the shared pool (#577, after #581). Since #572 several clients can share one server with their own tokens, which makes both reachable. It follows Residue check integrity so its release goes through a gate whose zero-residue claim is true.
+
 ## Phase: Actual API 26.11 adoption
 state: planned
 plan:
 
-Adopts stable @actual-app/api 26.11.0, which carries the upstream fixes we contributed (actual#9020 for #479, actual#8998 for #548). Nothing here can start before that release is published; the bump ticket is filed when Dependabot opens it. It sits after Phase 1 so the API bump is verified by a gate that no longer writes the data dir twice.
+Adopts stable @actual-app/api 26.11.0, which carries the upstream fixes we contributed (actual#9020 for #479, actual#8998 for #548). Nothing here can start before that release is published; the bump ticket is filed when Dependabot opens it. It sits after Residue check integrity and Session admission hardening so the API bump is verified by a gate whose zero-residue claim is true. If 26.11.0 lands earlier, it waits for the open phase to close rather than interleaving.
 
 ## Phase: Backlog
 state: backlog
