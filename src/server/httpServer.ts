@@ -12,7 +12,7 @@ import logger, { resolveRequestId } from '../logger.js';
 import { attachTransportErrorLogger } from '../lib/transportErrorLogger.js';
 import { getLocalIp } from '../utils.js';
 import actualToolsManager from '../actualToolsManager.js';
-import { getConnectionState, connectToActualForSession, shutdownActualForSession, shutdownActual, canAcceptNewSession, isConnectionPoolEnabled } from '../actualConnection.js';
+import { getConnectionState, connectToActualForSession, shutdownActualForSession, shutdownActual, reserveSession, releaseReservation, isConnectionPoolEnabled } from '../actualConnection.js';
 import { connectionPool, type EvictionReason } from '../lib/ActualConnectionPool.js';
 import { clearSessionBudgetState, setSessionLivenessCheck, initialBudgetForSession, getBudgetRegistry } from '../lib/actual-adapter.js';
 import { errorLogFields } from '../lib/errors.js';
@@ -542,8 +542,12 @@ export async function startHttpServer(
           return;
         }
 
-        // Check if we can accept a new session (concurrent limit)
-        if (!canAcceptNewSession()) {
+        // Check if we can accept a new session (concurrent limit). #581: the session id is chosen
+        // HERE and its slot reserved synchronously under it, before anything awaits. Checking a
+        // count and reserving later (at login) admitted every initialize that arrived while
+        // earlier ones were still logging in.
+        const sid = randomUUID();
+        if (!reserveSession(sid)) {
           const state = getConnectionState();
           const stats = state.connectionPool;
           const timeoutMinutes = state.idleTimeoutMinutes || 2;
@@ -558,7 +562,8 @@ export async function startHttpServer(
               data: {
                 maxConcurrent: stats?.maxConcurrent,
                 activeSessions: stats?.activeSessions,
-                availableSlots: (stats?.maxConcurrent ?? 0) - (stats?.activeSessions ?? 0),
+                pendingReservations: stats?.pendingReservations,
+                availableSlots: Math.max(0, (stats?.maxConcurrent ?? 0) - (stats?.activeSessions ?? 0) - (stats?.pendingReservations ?? 0)),
                 idleTimeoutMinutes: timeoutMinutes
               }
             },
@@ -566,97 +571,108 @@ export async function startHttpServer(
           return;
         }
 
-        logger.debug('[SESSION] Creating new MCP server + transport for initialize');
-        const { server } = createServerInstance();
-
-        // Create a promise to track session initialization completion
-        let resolveInit: (() => void) | undefined;
-        let rejectInit: ((err: unknown) => void) | undefined;
-        const initPromise = new Promise<void>((resolve, reject) => {
-          resolveInit = resolve;
-          rejectInit = reject;
-        });
-        // Always-on safety net: if no concurrent code path is awaiting initPromise
-        // when rejectInit fires (e.g. session init fails before any tools/call
-        // arrives), the rejection would otherwise hit process.on('unhandledRejection')
-        // and exit the server. The original error is already logged inside the
-        // onsessioninitialized catch block below: we deliberately do NOT re-log here
-        // to avoid duplicate noise and any risk of leaking credentials.
-        initPromise.catch(() => {});
-
-        // The session belongs to the principal that initialized it. Resolved here,
-        // from this request, so the owner can never come from a later request.
-        const sessionOwner = resolvePrincipal(req);
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
-          enableJsonResponse: true,
-          // #563: the SDK awaits this on a valid DELETE, BEFORE it answers 200, so the pool
-          // slot is free by the time the client hears the session ended. It waits for the api
-          // mutex (#392), so another session's call in flight finishes first. Without evict:
-          // the DELETE route tears the session down itself after the 200.
-          onsessionclosed: async (sid: string) => {
-            if (isConnectionPoolEnabled()) await connectionPool.shutdownConnection(sid);
-          },
-          onsessioninitialized: async (sid: string) => {
-            logger.debug(`Session initialized: ${sid}`);
-            // Store the promise before starting initialization
-            sessionInitPromises.set(sid, initPromise);
-            // Initialize connection pool for this session
-            try {
-              // #571: open on the session's own budget (a restored #189 preference may live on
-              // another server), not on the default one.
-              const budget = initialBudgetForSession(sid);
-              await connectToActualForSession(sid, {
-                serverUrl: budget.serverUrl,
-                password: budget.password || '',
-                syncId: budget.syncId,
-                encryptionPassword: budget.encryptionPassword,
-              });
-              // Only register the transport if the pool connection succeeded.
-              // The pool stamped lastActivity when it created the entry, so it
-              // is already the source of truth for this session's idle clock.
-              recordSessionOwner(sid, sessionOwner);
-              transports.set(sid, transport);
-              // #530: let the pool time this session even after its entry is recycled.
-              // Pooling off (USE_CONNECTION_POOL=false) has no sweep, so nothing to register.
-              if (isConnectionPoolEnabled()) connectionPool.registerSession(sid);
-              logger.info(`[SESSION] Actual connection initialized for session: ${sid}`);
-              resolveInit?.();
-            } catch (err) {
-              logger.error(`[SESSION] Failed to initialize Actual for session ${sid}:`, err);
-              // Don't add failed sessions to transports map - they won't be usable anyway
-              // This prevents accumulation of dead sessions
-              // #438: remember WHY. The transport is still deliberately not registered,
-              // so the dead-session protection above is unchanged; without this the
-              // cause is known here and discarded, and the client's next request gets
-              // a bare "Session not found" that says nothing about a schema mismatch,
-              // a bad password or an unreachable server.
-              rememberInitFailure(sid, err, sessionOwner);
-              rejectInit?.(err);
-            } finally {
-              // Clean up the promise after a short delay to allow pending requests to complete
-              setTimeout(() => sessionInitPromises.delete(sid), 1000);
-            }
-          },
-        });
-
-        // connect transport then handle request (matching working example)
-        await server.connect(transport);
+        // #581: ONE try/finally from the reservation to the answer. The SDK answers 406 (Accept),
+        // 400 (bad JSON), an invalid JSON-RPC body and an already-initialized transport WITHOUT
+        // calling onsessioninitialized, and `server.connect` can throw; none of those reach the
+        // pool, and neither the idle sweep nor the #530 orphan sweep can see a slot that has no
+        // entry and no registration. This finally is the only thing that can give it back. The
+        // SDK awaits onsessioninitialized inside handleRequest, so here the session either
+        // registered (its reservation was handed over to the pool entry) or never will.
         try {
-          // Run in AsyncLocalStorage context so tools can access sessionId
-          // and the adapter can enforce per-request budget ACL (#156).
-          const allowedBudgetsInit = (req as Request & { allowedBudgets?: string[] }).allowedBudgets;
-          const requestId = resolveRequestId(req.get('x-correlation-id'));
-          await requestContext.run({ sessionId: undefined, requestId, allowedBudgets: allowedBudgetsInit, principal: resolvePrincipal(req) }, async () => {
-            await transport.handleRequest(req, res, req.body);
+          logger.debug('[SESSION] Creating new MCP server + transport for initialize');
+          const { server } = createServerInstance();
+
+          // Create a promise to track session initialization completion
+          let resolveInit: (() => void) | undefined;
+          let rejectInit: ((err: unknown) => void) | undefined;
+          const initPromise = new Promise<void>((resolve, reject) => {
+            resolveInit = resolve;
+            rejectInit = reject;
           });
-        } catch (err: unknown) {
-          logger.error('Transport.handleRequest failed during initialize: %o', err);
-          const e = err as Error | { stack?: unknown } | undefined;
-          if (e && typeof e.stack === 'string') logger.error(e.stack);
-          throw err;
+          // Always-on safety net: if no concurrent code path is awaiting initPromise
+          // when rejectInit fires (e.g. session init fails before any tools/call
+          // arrives), the rejection would otherwise hit process.on('unhandledRejection')
+          // and exit the server. The original error is already logged inside the
+          // onsessioninitialized catch block below: we deliberately do NOT re-log here
+          // to avoid duplicate noise and any risk of leaking credentials.
+          initPromise.catch(() => {});
+
+          // The session belongs to the principal that initialized it. Resolved here,
+          // from this request, so the owner can never come from a later request.
+          const sessionOwner = resolvePrincipal(req);
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => sid,
+            enableJsonResponse: true,
+            // #563: the SDK awaits this on a valid DELETE, BEFORE it answers 200, so the pool
+            // slot is free by the time the client hears the session ended. It waits for the api
+            // mutex (#392), so another session's call in flight finishes first. Without evict:
+            // the DELETE route tears the session down itself after the 200.
+            onsessionclosed: async (sid: string) => {
+              if (isConnectionPoolEnabled()) await connectionPool.shutdownConnection(sid);
+            },
+            onsessioninitialized: async (sid: string) => {
+              logger.debug(`Session initialized: ${sid}`);
+              // Store the promise before starting initialization
+              sessionInitPromises.set(sid, initPromise);
+              // Initialize connection pool for this session
+              try {
+                // #571: open on the session's own budget (a restored #189 preference may live on
+                // another server), not on the default one.
+                const budget = initialBudgetForSession(sid);
+                await connectToActualForSession(sid, {
+                  serverUrl: budget.serverUrl,
+                  password: budget.password || '',
+                  syncId: budget.syncId,
+                  encryptionPassword: budget.encryptionPassword,
+                });
+                // Only register the transport if the pool connection succeeded.
+                // The pool stamped lastActivity when it created the entry, so it
+                // is already the source of truth for this session's idle clock.
+                recordSessionOwner(sid, sessionOwner);
+                transports.set(sid, transport);
+                // #530: let the pool time this session even after its entry is recycled.
+                // Pooling off (USE_CONNECTION_POOL=false) has no sweep, so nothing to register.
+                if (isConnectionPoolEnabled()) connectionPool.registerSession(sid);
+                logger.info(`[SESSION] Actual connection initialized for session: ${sid}`);
+                resolveInit?.();
+              } catch (err) {
+                logger.error(`[SESSION] Failed to initialize Actual for session ${sid}:`, err);
+                // Don't add failed sessions to transports map - they won't be usable anyway
+                // This prevents accumulation of dead sessions
+                // #438: remember WHY. The transport is still deliberately not registered,
+                // so the dead-session protection above is unchanged; without this the
+                // cause is known here and discarded, and the client's next request gets
+                // a bare "Session not found" that says nothing about a schema mismatch,
+                // a bad password or an unreachable server.
+                rememberInitFailure(sid, err, sessionOwner);
+                rejectInit?.(err);
+              } finally {
+                // Clean up the promise after a short delay to allow pending requests to complete
+                setTimeout(() => sessionInitPromises.delete(sid), 1000);
+              }
+            },
+          });
+
+          // connect transport then handle request (matching working example)
+          await server.connect(transport);
+          try {
+            // Run in AsyncLocalStorage context so tools can access sessionId
+            // and the adapter can enforce per-request budget ACL (#156).
+            const allowedBudgetsInit = (req as Request & { allowedBudgets?: string[] }).allowedBudgets;
+            const requestId = resolveRequestId(req.get('x-correlation-id'));
+            await requestContext.run({ sessionId: undefined, requestId, allowedBudgets: allowedBudgetsInit, principal: resolvePrincipal(req) }, async () => {
+              await transport.handleRequest(req, res, req.body);
+            });
+          } catch (err: unknown) {
+            logger.error('Transport.handleRequest failed during initialize: %o', err);
+            const e = err as Error | { stack?: unknown } | undefined;
+            if (e && typeof e.stack === 'string') logger.error(e.stack);
+            throw err;
+          }
+          return;
+        } finally {
+          if (!transports.has(sid)) releaseReservation(sid);
         }
-        return;
       }
 
       // sessionId present -> reuse. Transport presence is the liveness signal:

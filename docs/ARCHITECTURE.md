@@ -122,7 +122,7 @@
 | **Tool Manager** | `src/actualToolsManager.ts` | Tool registry and dispatch | `registerTools()`, `callTool()` |
 | **MCP Connection** | `src/lib/ActualMCPConnection.ts` | MCP protocol implementation | `handleToolCall()`, `handleRequest()` |
 | **Adapter Layer** | `src/lib/actual-adapter.ts` (+ leaf modules in `src/lib/actual-adapter/`) | `withActualApi` wrapper: retry, concurrency, pooled vs legacy execution (#134, split in #166) | All Actual API functions |
-| **Connection Pool** | `src/lib/ActualConnectionPool.ts` | Per-session connections (up to `MAX_CONCURRENT_SESSIONS`, default 15), idle timeouts | `getConnection()`, `touch()`, `shutdownConnection()` |
+| **Connection Pool** | `src/lib/ActualConnectionPool.ts` | Per-session connections (up to `MAX_CONCURRENT_SESSIONS`, default 15, counting sessions still connecting: a slot is reserved at initialize, #581), idle timeouts | `getConnection()`, `touch()`, `shutdownConnection()` |
 | **Request Context** | `src/lib/requestContext.ts` | `AsyncLocalStorage` carrying the active session id (and principal) across async boundaries | `requestContext.run()` |
 | **Singleton State** | `src/lib/apiState.ts` | Shared flag for the `@actual-app/api` singleton "live" state, probed by the adapter to decide pool reuse | `isApiInitialized()` |
 | **Configuration** | `src/config.ts` | Environment validation | `config`, `configSchema` |

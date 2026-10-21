@@ -4818,57 +4818,74 @@ export async function switchBudget(name: string): Promise<{ name: string; syncId
     return { name: found.name, syncId: found.syncId, serverUrl: found.serverUrl };
   }
 
-  // Slow path: different server or credentials. Release the existing pool
-  // entry (bound to the previous syncId / server) BEFORE mutating the session
-  // map. Swallow shutdown errors: a stale or missing pool entry is benign.
-  try {
-    await connectionPool.shutdownConnection(sessionId);
-  } catch (e) {
-    logger.debug(`[ADAPTER] switchBudget: shutdownConnection raised (likely no prior entry): ${e}`);
-  }
-
-  // Update the per-session active-budget slot. Subsequent getActiveBudgetConfig
-  // calls for this session now return the new budget.
-  setSessionBudget(sessionId, key);
-  setPreferredBudgetSyncId(store?.principal, found.syncId); // #189: persist at commit
-
-  // Materialise a fresh pool entry bound to the new budget. Without this, the
-  // next withActualApi call would find no pool entry and fall back to the
-  // legacy init+shutdown path. Failure here is logged but not fatal: the
-  // legacy fallback still works, just less efficiently.
-  //
-  // #348 EXCEPTION: never for a stdio session. stdio gained a synthetic session
-  // id so it could switch budgets at all, but it must stay on the legacy
-  // init/shutdown cycle. A pooled entry for stdio would be created here and then
-  // NEVER refreshed, because connectionPool.touch() is called only from
-  // httpServer.ts; it would expire after SESSION_IDLE_TIMEOUT_MINUTES and
-  // cleanupIdleConnections would tear it down. Since #392 that teardown takes the api mutex and
-  // re-checks expiry, so it is no longer a mid-operation hazard, but an entry that is never
-  // refreshed still expires, and that is the reason that matters here. The
-  // legacy path re-reads getActiveBudgetConfig() on every call, so the switch
-  // still takes effect; it just costs an init per operation, which is what stdio
-  // already did before this ticket.
-  if (store?.transport === 'stdio') {
-    logger.debug(
-      `[ADAPTER] switchBudget: session ${sessionId} is stdio; skipping pool materialisation ` +
-        '(stdio stays on the legacy init/shutdown path by design, #348).',
+  // #581: hold this session's slot across the window between releasing the old entry and
+  // creating the new one, so a concurrent initialize cannot take it and leave this session over
+  // the cap. A session that holds a slot always re-reserves; one whose entry was already dropped
+  // may be refused when the pool is full, and getConnection below then fails the same way it
+  // always has (the legacy fallback). stdio never has a pool entry, so it reserves nothing.
+  const holdsSlot = store?.transport !== 'stdio' && connectionPool.reserveSession(sessionId);
+  if (store?.transport !== 'stdio' && !holdsSlot) {
+    logger.warn(
+      `[ADAPTER] switchBudget: session ${sessionId} holds no pool slot and the pool is full; ` +
+        'the switch proceeds on the legacy init+shutdown fallback.',
     );
-  } else if (_skipApiInitForTests) {
-    setApiInitialized(true);
-  } else {
+  }
+  try {
+    // Slow path: different server or credentials. Release the existing pool
+    // entry (bound to the previous syncId / server) BEFORE mutating the session
+    // map. Swallow shutdown errors: a stale or missing pool entry is benign.
     try {
-      await connectionPool.getConnection(sessionId, {
-        serverUrl: found.serverUrl,
-        password: found.password || '',
-        syncId: found.syncId,
-        encryptionPassword: found.encryptionPassword,
-      });
-    } catch (poolErr) {
-      logger.warn(
-        `[ADAPTER] switchBudget: failed to materialise new pool entry for session ${sessionId}: ${poolErr}. ` +
-          'Subsequent calls will use the legacy init+shutdown fallback.',
-      );
+      await connectionPool.shutdownConnection(sessionId);
+    } catch (e) {
+      logger.debug(`[ADAPTER] switchBudget: shutdownConnection raised (likely no prior entry): ${e}`);
     }
+
+    // Update the per-session active-budget slot. Subsequent getActiveBudgetConfig
+    // calls for this session now return the new budget.
+    setSessionBudget(sessionId, key);
+    setPreferredBudgetSyncId(store?.principal, found.syncId); // #189: persist at commit
+
+    // Materialise a fresh pool entry bound to the new budget. Without this, the
+    // next withActualApi call would find no pool entry and fall back to the
+    // legacy init+shutdown path. Failure here is logged but not fatal: the
+    // legacy fallback still works, just less efficiently.
+    //
+    // #348 EXCEPTION: never for a stdio session. stdio gained a synthetic session
+    // id so it could switch budgets at all, but it must stay on the legacy
+    // init/shutdown cycle. A pooled entry for stdio would be created here and then
+    // NEVER refreshed, because connectionPool.touch() is called only from
+    // httpServer.ts; it would expire after SESSION_IDLE_TIMEOUT_MINUTES and
+    // cleanupIdleConnections would tear it down. Since #392 that teardown takes the api mutex and
+    // re-checks expiry, so it is no longer a mid-operation hazard, but an entry that is never
+    // refreshed still expires, and that is the reason that matters here. The
+    // legacy path re-reads getActiveBudgetConfig() on every call, so the switch
+    // still takes effect; it just costs an init per operation, which is what stdio
+    // already did before this ticket.
+    if (store?.transport === 'stdio') {
+      logger.debug(
+        `[ADAPTER] switchBudget: session ${sessionId} is stdio; skipping pool materialisation ` +
+          '(stdio stays on the legacy init/shutdown path by design, #348).',
+      );
+    } else if (_skipApiInitForTests) {
+      setApiInitialized(true);
+    } else {
+      try {
+        await connectionPool.getConnection(sessionId, {
+          serverUrl: found.serverUrl,
+          password: found.password || '',
+          syncId: found.syncId,
+          encryptionPassword: found.encryptionPassword,
+        });
+      } catch (poolErr) {
+        logger.warn(
+          `[ADAPTER] switchBudget: failed to materialise new pool entry for session ${sessionId}: ${poolErr}. ` +
+            'Subsequent calls will use the legacy init+shutdown fallback.',
+        );
+      }
+    }
+  } finally {
+    // A no-op once getConnection handed the reservation over to the new entry.
+    if (holdsSlot) connectionPool.releaseReservation(sessionId);
   }
 
   logger.info(

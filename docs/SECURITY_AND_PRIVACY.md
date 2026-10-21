@@ -104,7 +104,9 @@ Known limitations:
   throttle at your reverse proxy.
 - **The session pool is shared.** `MAX_CONCURRENT_SESSIONS` (default 15) counts every
   principal's sessions together, so one client opening many sessions can starve the
-  others. A per-principal cap is tracked in #577.
+  others. The cap itself is a hard bound: a slot is reserved synchronously at
+  initialize, so parallel initializes cannot exceed it (#581). A per-principal cap is
+  tracked in #577.
 - **One budget is open per process.** Two clients working on different budgets at the
   same time force a budget reload on every alternation, which serialises all sessions
   for the reload. Give each client one budget where you can, and for heavy concurrent use

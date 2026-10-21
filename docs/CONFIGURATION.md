@@ -55,7 +55,7 @@ Legend for **Source**: `schema` = validated Zod key; `raw` = read directly from
 | Variable | Type | Default | Required | Secret | Source | Read site(s) | Notes |
 |----------|------|---------|----------|--------|--------|--------------|-------|
 | `USE_CONNECTION_POOL` | bool string | `true` | No | no | raw | `actualConnection.ts` | Enable session pooling (future schema-promotion candidate) |
-| `MAX_CONCURRENT_SESSIONS` | int string | `15` | No | no | schema | config; also raw at `ActualConnectionPool.ts:60` | Max concurrent MCP sessions |
+| `MAX_CONCURRENT_SESSIONS` | int string | `15` | No | no | schema | config; also raw at `ActualConnectionPool.ts:92` | Max concurrent MCP sessions, counting sessions still connecting (a slot is reserved at initialize, #581) |
 | `SESSION_IDLE_TIMEOUT_MINUTES` | int string | `5` | No | no | raw | `ActualConnectionPool.ts:63` | Minutes before idle session cleanup (future schema-promotion candidate) |
 | `ACTUAL_API_CONCURRENCY` | int string | `5` | No | no | raw | `lib/actual-adapter/concurrency.ts` | Adapter concurrency cap (future schema-promotion candidate) |
 

@@ -77,6 +77,14 @@ class ActualConnectionPool {
   // would close its transport mid-operation. Entries have the #392 lock re-check and the
   // #378 in-drain touch for the same hazard; registrations have neither.
   private inFlight: Map<string, number> = new Map();
+  // #581: session ids that hold a slot under MAX_CONCURRENT_SESSIONS but have no initialized
+  // entry yet. Before this the cap counted initialized entries only, and an entry is created
+  // after the login and budget download, so every initialize that arrived while those were in
+  // flight saw the same count and was admitted: 6 parallel initializes all logged in under a cap
+  // of 2. A slot is now taken synchronously at admission (`reserveSession`) and handed over to
+  // the entry in one synchronous block in `getConnection`. Ids only: this count reaches the
+  // unauthenticated /health as a number, never as a list.
+  private reservations: Set<string> = new Set();
 
   constructor() {
     // Read from environment variable or default to 15
@@ -263,12 +271,42 @@ class ActualConnectionPool {
   }
 
   /**
-   * Check if we can accept a new session (under the concurrent limit)
-   * Returns true if limit not reached, false otherwise
+   * #581: slots held under MAX_CONCURRENT_SESSIONS, optionally leaving one session out: every
+   * initialized entry, plus every reservation whose id has no initialized entry (a session that
+   * holds both counts once).
    */
-  canAcceptNewSession(): boolean {
-    const activeConnections = Array.from(this.connections.values()).filter(c => c.initialized).length;
-    return activeConnections < this.MAX_CONCURRENT_SESSIONS;
+  private slotsInUse(exclude?: string): number {
+    let n = 0;
+    for (const [id, c] of this.connections) if (c.initialized && id !== exclude) n++;
+    for (const id of this.reservations) if (id !== exclude && !this.connections.get(id)?.initialized) n++;
+    return n;
+  }
+
+  /** #581: reservations still waiting for their entry (a count only, see `reservations`). */
+  private pendingReservations(): number {
+    let n = 0;
+    for (const id of this.reservations) if (!this.connections.get(id)?.initialized) n++;
+    return n;
+  }
+
+  /**
+   * #581: take a slot for `sessionId`, synchronously. The count and the add have no `await`
+   * between them, which is the whole fix: parallel callers cannot all see the same count.
+   * A session that already holds a slot (an initialized entry or a reservation) reserves again
+   * without counting twice, which is how switchBudget keeps its slot across its slow path.
+   * Every successful call must be paired with `releaseReservation` on the caller's exit path;
+   * `getConnection` hands a reservation over to the entry on success.
+   */
+  reserveSession(sessionId: string): boolean {
+    const holds = this.reservations.has(sessionId) || this.connections.get(sessionId)?.initialized === true;
+    if (!holds && this.slotsInUse() >= this.MAX_CONCURRENT_SESSIONS) return false;
+    this.reservations.add(sessionId);
+    return true;
+  }
+
+  /** #581: give back a slot that never became an entry. Idempotent; a no-op after the hand-over. */
+  releaseReservation(sessionId: string): void {
+    this.reservations.delete(sessionId);
   }
 
   /**
@@ -338,8 +376,11 @@ class ActualConnectionPool {
       return;
     }
 
-    // Check concurrent session limit
-    const activeConnections = Array.from(this.connections.values()).filter(c => c.initialized).length;
+    // Check concurrent session limit. #581: against every OTHER session's slot, reservations
+    // included, and take this session's slot in the same synchronous block, so a caller that
+    // did not reserve first (switchBudget's slow path, a non-HTTP caller) is just as atomic as
+    // the initialize route. A caller that already reserved keeps its reservation.
+    const activeConnections = this.slotsInUse(sessionId);
     if (activeConnections >= this.MAX_CONCURRENT_SESSIONS) {
       const errorMsg = `[ConnectionPool] Max concurrent sessions (${this.MAX_CONCURRENT_SESSIONS}) reached. Active: ${activeConnections}. Please close some connections or wait for idle sessions to timeout.`;
       logger.warn(errorMsg);
@@ -364,6 +405,9 @@ class ActualConnectionPool {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
 
+    // #581: taken here, still with no `await` since the check above, so that a throw before the
+    // try (the mkdir) cannot leave a slot behind; the catch below releases it on any failure.
+    this.reservations.add(sessionId);
     try {
       // #390 round 2: hold the api mutex across init + download.
       //
@@ -412,7 +456,10 @@ class ActualConnectionPool {
         syncId: BUDGET_SYNC_ID,
       };
 
+      // #581: the hand-over. Both in one synchronous block, so the slot is never counted twice
+      // (entry plus reservation) or not at all.
       this.connections.set(sessionId, conn);
+      this.reservations.delete(sessionId);
       logger.info(`[ConnectionPool] Connection ready for session: ${sessionId}`);
 
     } catch (err) {
@@ -447,6 +494,8 @@ class ActualConnectionPool {
 
       // Ensure this session is not in the connections map
       this.connections.delete(sessionId);
+      // #581: and holds no slot.
+      this.reservations.delete(sessionId);
 
       throw err;
     }
@@ -884,6 +933,7 @@ class ActualConnectionPool {
   getStats(): { 
     totalSessions: number; 
     activeSessions: number;
+    pendingReservations: number;
     maxConcurrent: number;
     sharedConnection: boolean;
     sessions: Array<{ sessionId: string; lastActivity: Date; idleMinutes: number }>;
@@ -898,6 +948,7 @@ class ActualConnectionPool {
     return {
       totalSessions: this.connections.size,
       activeSessions: Array.from(this.connections.values()).filter(c => c.initialized).length,
+      pendingReservations: this.pendingReservations(),
       maxConcurrent: this.MAX_CONCURRENT_SESSIONS,
       sharedConnection: this.sharedConnection?.initialized || false,
       sessions

@@ -79,8 +79,8 @@ const FS_READS = new Set([
   'readFileSync', 'readFile', 'existsSync', 'readdirSync', 'readdir', 'statSync', 'stat',
   'lstatSync', 'lstat', 'accessSync', 'access', 'realpathSync', 'realpath', 'constants',
 ]);
-const CONN_READS = new Set(['getConnectionState', 'canAcceptNewSession']);
-const POOL_READS = new Set(['getStats', 'has', 'hasConnection', 'isLive', 'getConnectionInfo', 'isInitialized', 'canAcceptNewSession', 'getIdleTimeoutMinutes']);
+const CONN_READS = new Set(['getConnectionState']);
+const POOL_READS = new Set(['getStats', 'has', 'hasConnection', 'isLive', 'getConnectionInfo', 'isInitialized', 'getIdleTimeoutMinutes']);
 const TEARDOWN_NAMES = ['shutdownActual', 'shutdownActualForSession', 'clearSessionBudgetState'];
 const WATCHED = [
   ['fs', /^(?:node:)?fs(?:\/promises)?$/],

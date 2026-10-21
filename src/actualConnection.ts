@@ -208,9 +208,18 @@ export function getConnectionState() {
   };
 }
 
-export function canAcceptNewSession(): boolean {
+/**
+ * #581: take a session slot at admission, synchronously (see `connectionPool.reserveSession`).
+ * Shared connection mode has no cap, so it always admits and reserves nothing.
+ */
+export function reserveSession(sessionId: string): boolean {
   if (!useConnectionPool) {
     return true; // Shared connection mode - always accept
   }
-  return connectionPool.canAcceptNewSession();
+  return connectionPool.reserveSession(sessionId);
+}
+
+/** #581: release a slot that never became a pool entry. Idempotent. */
+export function releaseReservation(sessionId: string): void {
+  if (useConnectionPool) connectionPool.releaseReservation(sessionId);
 }
