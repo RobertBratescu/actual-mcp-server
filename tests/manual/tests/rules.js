@@ -6,7 +6,7 @@ import { fail, skip } from '../assert.js';
  * Regression test: rule action without 'op' field should default to 'set'.
  *
  * Reads from context:  categoryId (used as rule action value)
- * Writes to context:   ruleId, ruleWithoutOpId
+ * Writes to context:   ruleId, ruleWithoutOpId, ruleStage342Id (each nulled once its delete is verified)
  */
 
 /**
@@ -78,6 +78,8 @@ export async function rulesTests(client, context) {
       actions: [{ op: "set", field: "category", value: context.categoryId }],
     });
     const noStageId = noStage.id || noStage.result || noStage;
+    // #585: recorded before the read-back, so a read-back that throws still leaves it deletable.
+    context.ruleStage342Id = noStageId;
     const back = await callTool("actual_rules_get", {});
     const all = back.rules || back.result || back || [];
     const created = (Array.isArray(all) ? all : []).find((r) => r && r.id === noStageId);
@@ -89,7 +91,6 @@ export async function rulesTests(client, context) {
       fail(`#342 stage default: expected stage null, got ${JSON.stringify(created.stage)}. ` +
 "Every MCP-created rule would out-rank the user's UI rules.");
     }
-    context.ruleStage342Id = noStageId;
   } catch (err) {
     fail(["#342 stage default:", err.message].map(String).join(" "));
   }
@@ -279,7 +280,9 @@ export async function rulesTests(client, context) {
     return Array.isArray(arr) ? arr.map(r => r.id) : [];
   }
 
-  for (const [label, idKey] of [['ruleId', 'ruleId'], ['ruleWithoutOpId', 'ruleWithoutOpId']]) {
+  // #585: the #342 stage rule was created above and never deleted, so every run leaked one
+  // (192 had piled up unseen until #584 let the zero-residue assertion read rules).
+  for (const [label, idKey] of [['ruleId', 'ruleId'], ['ruleWithoutOpId', 'ruleWithoutOpId'], ['ruleStage342Id', 'ruleStage342Id']]) {
     const id = context[idKey];
     if (!id) { skip(`Skipping delete of ${label} (not in context)`); continue; }
     console.log(`\nDeleting ${label} (${id})...`);

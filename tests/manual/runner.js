@@ -34,7 +34,7 @@ import { config as loadDotenv } from 'dotenv';
 import { createClient } from './mcp-client.js';
 import { createClient as createStdioClient } from './mcp-client-stdio.js';
 import { sweepResidue, assertNoResidue, EXIT_RESIDUE, EXIT_UNSAFE_BUDGET } from './residue.js';
-import { failureCount, failureList } from './assert.js';
+import { fail, failureCount, failureList } from './assert.js';
 import { sanityTests } from './tests/sanity.js';
 import { smokeTests } from './tests/smoke.js';
 import { accountTests } from './tests/account.js';
@@ -287,6 +287,18 @@ export async function run() {
         console.log("\nDeleting test rule (upsert)...");
         await callTool("actual_rules_delete", { id: context.rulesUpsertId });
         console.log("✓ Rule (upsert) deleted");
+      }
+      // #585: a backstop for a module delete that failed WITHOUT throwing (fail() records and
+      // returns). Its own try/catch, so a failure here cannot skip the deletes below; a module
+      // that threw never reaches this phase, and the next run's pre-run sweep removes its rule.
+      if (context.ruleStage342Id) {
+        console.log("\nDeleting test rule (#342 stage)...");
+        try {
+          await callTool("actual_rules_delete", { id: context.ruleStage342Id });
+          console.log("✓ Rule (#342 stage) deleted");
+        } catch (err) {
+          fail(`Could not delete the #342 stage rule ${context.ruleStage342Id}: ${err.message}. That is residue.`);
+        }
       }
       if (context.ruleId) {
         console.log("\nDeleting test rule...");
