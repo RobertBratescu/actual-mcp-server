@@ -512,6 +512,7 @@ All configuration is via environment variables. Copy `.env.example` to `.env` to
 | **Session Management** ||||
 | `USE_CONNECTION_POOL` | `true` | No | Enable session-based connection pooling |
 | `MAX_CONCURRENT_SESSIONS` | `15` | No | Maximum concurrent MCP sessions allowed |
+| `MAX_SESSIONS_PER_PRINCIPAL` | unset | No | Maximum concurrent sessions per OIDC subject or named `MCP_STATIC_TOKENS` entry; unset means no per-principal cap. The legacy token and unauthenticated requests are not capped |
 | `SESSION_IDLE_TIMEOUT_MINUTES` | `5` | No | Minutes before idle session cleanup |
 | **Security & Authentication** ||||
 | `AUTH_PROVIDER` | `none` | No | Auth mode: `none` (static Bearer) or `oidc` (JWKS-validated JWT) |

@@ -7,7 +7,7 @@ import { withApiLock } from './lib/apiLock.js';
 import { initApiLoggedIn } from './lib/apiLogin.js';
 import logger from './logger.js';
 import config from './config.js';
-import { connectionPool } from './lib/ActualConnectionPool.js';
+import { connectionPool, type AdmissionResult } from './lib/ActualConnectionPool.js';
 import { createModuleLogger } from './lib/loggerFactory.js';
 
 const log = createModuleLogger('CONNECTION');
@@ -19,6 +19,10 @@ let initializing = false;
 let initializationError: Error | null = null;
 // Feature flag to enable connection pooling - can be disabled via environment variable
 let useConnectionPool = process.env.USE_CONNECTION_POOL !== 'false';
+// #577: the per-principal cap is a pool feature; with pooling off nothing is capped at all.
+if (!useConnectionPool && config.MAX_SESSIONS_PER_PRINCIPAL !== undefined) {
+  log.warn('MAX_SESSIONS_PER_PRINCIPAL is set but USE_CONNECTION_POOL=false, so it has no effect');
+}
 
 /** #530: httpServer registers sessions with the pool only when the pool is in use. */
 export function isConnectionPoolEnabled(): boolean {
@@ -209,17 +213,16 @@ export function getConnectionState() {
 }
 
 /**
- * #581: take a session slot at admission, synchronously (see `connectionPool.reserveSession`).
- * Shared connection mode has no cap, so it always admits and reserves nothing.
+ * #581/#577: take a session slot at admission, synchronously, under the global cap and the
+ * per-principal cap (see `connectionPool.admitSession`). Pass a principal only for a request that
+ * is capped. Shared connection mode has no cap, so it always admits and records nothing.
  */
-export function reserveSession(sessionId: string): boolean {
-  if (!useConnectionPool) {
-    return true; // Shared connection mode - always accept
-  }
-  return connectionPool.reserveSession(sessionId);
+export function admitSession(sessionId: string, principal?: string): AdmissionResult {
+  if (!useConnectionPool) return { admitted: true };
+  return connectionPool.admitSession(sessionId, principal);
 }
 
-/** #581: release a slot that never became a pool entry. Idempotent. */
-export function releaseReservation(sessionId: string): void {
-  if (useConnectionPool) connectionPool.releaseReservation(sessionId);
+/** #577: release the slot and the admission of an initialize that never registered. Idempotent. */
+export function releaseAdmission(sessionId: string): void {
+  if (useConnectionPool) connectionPool.releaseAdmission(sessionId);
 }

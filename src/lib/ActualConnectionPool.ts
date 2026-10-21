@@ -85,11 +85,22 @@ class ActualConnectionPool {
   // the entry in one synchronous block in `getConnection`. Ids only: this count reaches the
   // unauthenticated /health as a number, never as a list.
   private reservations: Set<string> = new Set();
+  // #577: session id to the principal its admission was capped under, for the session's whole
+  // lifetime (not the pool entry's: a mid-session pool drop keeps the session, so it keeps
+  // counting). A principal's count is the number of values equal to it, computed by iterating,
+  // so there is no counter to drift and a principal with no sessions has no value here. Only
+  // capped admissions are recorded: the cap must be set and the caller must pass a principal.
+  // Deleted by `forgetSession` (every session end) and `releaseAdmission` (an initialize that
+  // never registered). Never logged, never in getStats.
+  private admissions: Map<string, string> = new Map();
+  private readonly MAX_SESSIONS_PER_PRINCIPAL: number | undefined;
 
   constructor() {
     // Read from environment variable or default to 15
     // @actual-app/api is a singleton, so concurrent sessions cause conflicts
     this.MAX_CONCURRENT_SESSIONS = parseInt(process.env.MAX_CONCURRENT_SESSIONS || '15', 10);
+    // #577: validated by the config schema, so no raw read here.
+    this.MAX_SESSIONS_PER_PRINCIPAL = config.MAX_SESSIONS_PER_PRINCIPAL;
     
     // Configurable idle timeout (in minutes)
     const idleTimeoutMinutes = parseInt(process.env.SESSION_IDLE_TIMEOUT_MINUTES || '5', 10);
@@ -99,6 +110,9 @@ class ActualConnectionPool {
     this.CLEANUP_INTERVAL = Math.max(Math.floor(this.IDLE_TIMEOUT / 5), 2 * 60 * 1000);
     
     logger.info(`[ConnectionPool] Max concurrent sessions: ${this.MAX_CONCURRENT_SESSIONS}`);
+    if (this.MAX_SESSIONS_PER_PRINCIPAL !== undefined) {
+      logger.info(`[ConnectionPool] Max sessions per principal: ${this.MAX_SESSIONS_PER_PRINCIPAL}`);
+    }
     logger.info(`[ConnectionPool] Session idle timeout: ${idleTimeoutMinutes} minutes`);
     logger.info(`[ConnectionPool] Cleanup interval: ${Math.floor(this.CLEANUP_INTERVAL / 1000)}s`);
     
@@ -196,9 +210,15 @@ class ActualConnectionPool {
     this.registered.set(sessionId, Date.now());
   }
 
-  /** #530: drop a registration (idempotent). Every eviction path calls this itself. */
+  /**
+   * #530: drop a registration (idempotent). Every eviction path calls this itself.
+   * #577: also drops the session's per-principal admission. Every session end (DELETE, idle
+   * eviction, an evicting shutdown, the orphan sweep) reaches here through the transport's
+   * teardown; a non-evicting `shutdownConnection` does not, so the session keeps counting.
+   */
   forgetSession(sessionId: string): void {
     this.registered.delete(sessionId);
+    this.admissions.delete(sessionId);
   }
 
   /**
@@ -298,15 +318,50 @@ class ActualConnectionPool {
    * `getConnection` hands a reservation over to the entry on success.
    */
   reserveSession(sessionId: string): boolean {
+    return this.admitSession(sessionId).admitted;
+  }
+
+  /**
+   * #577: `reserveSession` plus the per-principal cap, in the same synchronous call. The global
+   * check runs first, then the per-principal one; a refusal of either scope records nothing.
+   * Only the initialize route passes a principal, and only for a request that is capped (see
+   * `capPrincipal` in httpServer.ts); every other caller is bounded by the global cap alone.
+   * A principal refusal carries the caller's own cap and count and nothing about anyone else.
+   */
+  admitSession(sessionId: string, principal?: string): AdmissionResult {
     const holds = this.reservations.has(sessionId) || this.connections.get(sessionId)?.initialized === true;
-    if (!holds && this.slotsInUse() >= this.MAX_CONCURRENT_SESSIONS) return false;
+    if (!holds && this.slotsInUse() >= this.MAX_CONCURRENT_SESSIONS) return { admitted: false, scope: 'global' };
+    const cap = this.MAX_SESSIONS_PER_PRINCIPAL;
+    const capped = principal !== undefined && cap !== undefined;
+    if (capped && !this.admissions.has(sessionId)) {
+      const count = this.principalSessions(principal);
+      if (count >= cap) return { admitted: false, scope: 'principal', cap, count };
+    }
     this.reservations.add(sessionId);
-    return true;
+    if (capped) this.admissions.set(sessionId, principal);
+    return { admitted: true };
+  }
+
+  /** #577: sessions admitted under `principal` (iterated, see `admissions`). */
+  private principalSessions(principal: string): number {
+    let n = 0;
+    for (const p of this.admissions.values()) if (p === principal) n++;
+    return n;
   }
 
   /** #581: give back a slot that never became an entry. Idempotent; a no-op after the hand-over. */
   releaseReservation(sessionId: string): void {
     this.reservations.delete(sessionId);
+  }
+
+  /**
+   * #577: give back everything an initialize that never registered took: its slot and its
+   * per-principal admission. Idempotent. A session that did register keeps its admission until
+   * `forgetSession`.
+   */
+  releaseAdmission(sessionId: string): void {
+    this.reservations.delete(sessionId);
+    this.admissions.delete(sessionId);
   }
 
   /**
@@ -955,6 +1010,12 @@ class ActualConnectionPool {
     };
   }
 }
+
+/** #577: the outcome of `admitSession`. A refusal records nothing. */
+export type AdmissionResult =
+  | { admitted: true }
+  | { admitted: false; scope: 'global' }
+  | { admitted: false; scope: 'principal'; cap: number; count: number };
 
 // Export singleton instance
 export const connectionPool = new ActualConnectionPool();

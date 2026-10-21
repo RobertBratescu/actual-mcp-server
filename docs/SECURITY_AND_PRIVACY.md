@@ -103,10 +103,14 @@ Known limitations:
   least 128 bits for a hex token); if the server is reachable from an untrusted network,
   throttle at your reverse proxy.
 - **The session pool is shared.** `MAX_CONCURRENT_SESSIONS` (default 15) counts every
-  principal's sessions together, so one client opening many sessions can starve the
-  others. The cap itself is a hard bound: a slot is reserved synchronously at
-  initialize, so parallel initializes cannot exceed it (#581). A per-principal cap is
-  tracked in #577.
+  principal's sessions together, and it is a hard bound: a slot is reserved
+  synchronously at initialize, so parallel initializes cannot exceed it (#581). Set
+  `MAX_SESSIONS_PER_PRINCIPAL` so one client cannot starve the others (#577): a principal
+  at its cap gets a 503 naming its own count, and other principals still connect. The
+  cap is per principal, not per person: two named tokens held by one person are two
+  principals. Requests on the legacy `MCP_SSE_AUTHORIZATION` token and unauthenticated
+  requests are not capped (they have no principal to count against), so they remain
+  bounded only by the global cap. Unset by default.
 - **One budget is open per process.** Two clients working on different budgets at the
   same time force a budget reload on every alternation, which serialises all sessions
   for the reload. Give each client one budget where you can, and for heavy concurrent use

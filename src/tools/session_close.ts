@@ -12,7 +12,7 @@ const InputSchema = z.object({
 
 const tool: ToolDefinition = {
   name: 'actual_session_close',
-  description: 'Close one of your idle MCP sessions to free up connection slots. Useful when you get "Max concurrent sessions reached" errors. Only closes sessions you opened, other than the current one.',
+  description: 'Close one of your idle MCP sessions to free up connection slots. Useful when you get "Max concurrent sessions reached" or "Max sessions per principal reached" errors. Only closes sessions you opened, other than the current one.',
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     const input = InputSchema.parse(args || {});

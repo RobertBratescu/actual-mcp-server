@@ -12,7 +12,7 @@ import logger, { resolveRequestId } from '../logger.js';
 import { attachTransportErrorLogger } from '../lib/transportErrorLogger.js';
 import { getLocalIp } from '../utils.js';
 import actualToolsManager from '../actualToolsManager.js';
-import { getConnectionState, connectToActualForSession, shutdownActualForSession, shutdownActual, reserveSession, releaseReservation, isConnectionPoolEnabled } from '../actualConnection.js';
+import { getConnectionState, connectToActualForSession, shutdownActualForSession, shutdownActual, admitSession, releaseAdmission, isConnectionPoolEnabled } from '../actualConnection.js';
 import { connectionPool, type EvictionReason } from '../lib/ActualConnectionPool.js';
 import { clearSessionBudgetState, setSessionLivenessCheck, initialBudgetForSession, getBudgetRegistry } from '../lib/actual-adapter.js';
 import { errorLogFields } from '../lib/errors.js';
@@ -65,6 +65,19 @@ function resolvePrincipal(req: Request): string | undefined {
   const staticPrincipal = (req as Request & { staticPrincipal?: string }).staticPrincipal;
   if (staticPrincipal) return staticPrincipal;
   return config.MCP_SSE_AUTHORIZATION ? LEGACY_STATIC_PRINCIPAL : undefined;
+}
+
+// #577: the principal MAX_SESSIONS_PER_PRINCIPAL caps, decided by HOW the request authenticated,
+// never by the principal string (an OIDC subject that happens to read "static-bearer" is capped).
+// OIDC: the verified subject. A MCP_STATIC_TOKENS token: its own principal. Exempt, so bounded by
+// the global cap alone: the legacy MCP_SSE_AUTHORIZATION token, which every holder shares (capping
+// it would silently lower the effective global cap on every single-token deployment), and an
+// unauthenticated request, which has no principal.
+function capPrincipal(req: Request): string | undefined {
+  if (config.AUTH_PROVIDER === 'oidc') {
+    return (req as Request & { auth?: { subject?: string } }).auth?.subject;
+  }
+  return (req as Request & { staticPrincipal?: string }).staticPrincipal;
 }
 
 export async function startHttpServer(
@@ -546,8 +559,30 @@ export async function startHttpServer(
         // HERE and its slot reserved synchronously under it, before anything awaits. Checking a
         // count and reserving later (at login) admitted every initialize that arrived while
         // earlier ones were still logging in.
+        // #577: the per-principal cap is checked in the same synchronous call, after the global one.
         const sid = randomUUID();
-        if (!reserveSession(sid)) {
+        const admission = admitSession(sid, capPrincipal(req));
+        if (!admission.admitted && admission.scope === 'principal') {
+          const timeoutMinutes = getConnectionState().idleTimeoutMinutes || 2;
+          // Only the caller's own cap and count: nothing here is derived from another principal,
+          // and the log line carries no principal and no session id.
+          logger.warn('[SESSION] Rejecting new session: per-principal cap reached', { cap: admission.cap, count: admission.count });
+          res.status(503).json({
+            jsonrpc: '2.0',
+            id: payload?.id ?? null,
+            error: {
+              code: -32000,
+              message: `Max sessions per principal (${admission.cap}) reached. Yours: ${admission.count}. Please close one of your sessions or wait for idle sessions to time out (${timeoutMinutes} minutes).`,
+              data: {
+                maxSessionsPerPrincipal: admission.cap,
+                yourSessions: admission.count,
+                idleTimeoutMinutes: timeoutMinutes,
+              },
+            },
+          });
+          return;
+        }
+        if (!admission.admitted) {
           const state = getConnectionState();
           const stats = state.connectionPool;
           const timeoutMinutes = state.idleTimeoutMinutes || 2;
@@ -671,7 +706,7 @@ export async function startHttpServer(
           }
           return;
         } finally {
-          if (!transports.has(sid)) releaseReservation(sid);
+          if (!transports.has(sid)) releaseAdmission(sid);
         }
       }
 

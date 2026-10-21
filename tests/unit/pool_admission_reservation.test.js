@@ -23,8 +23,13 @@
 //   P-idempotent    reserve twice and release twice for one id count once; a held entry
 //                   re-reserves at a full cap while a new id is refused; shutdownConnection leaves
 //                   a reservation alone; a double release does not touch another id's reservation.
-//   P-pool-off      (negative) USE_CONNECTION_POOL=false: actualConnection.reserveSession always
-//                   admits and reserves nothing.
+//   P-pool-off      (negative) USE_CONNECTION_POOL=false: actualConnection.admitSession always
+//                   admits and records nothing, even with a principal and a per-principal cap set
+//                   (#577). The startup warning for that combination is not asserted here.
+//   P-scope         (#577, cap 2, MAX_SESSIONS_PER_PRINCIPAL=1) admitSession checks the global cap
+//                   first, then the principal's; a refusal of either scope records nothing; a
+//                   session already admitted re-admits without counting itself; getConnection's
+//                   own reservation records no admission; forgetSession and releaseAdmission drop it.
 //
 // Run: node tests/unit/pool_admission_reservation.test.js
 
@@ -155,7 +160,29 @@ ${TAIL}`;
 
 const NOPOOL = `${STUBS}
 const conn = await import('./dist/src/actualConnection.js');
-results.nopool = { admitted: ['n1', 'n2', 'n3', 'n4', 'n5'].map((s) => conn.reserveSession(s)), pending: pending() };
+results.nopool = { admitted: ['n1', 'n2', 'n3', 'n4', 'n5'].map((s) => conn.admitSession(s, 'alice').admitted), pending: pending(), admissions: connectionPool.admissions.size };
+${TAIL}`;
+
+const SCOPE = `${STUBS}
+const names = () => [...connectionPool.admissions.values()].sort();
+const sc = {};
+sc.a1 = connectionPool.admitSession('a1', 'alice');
+sc.a2 = connectionPool.admitSession('a2', 'alice');
+sc.b1 = connectionPool.admitSession('b1', 'bob');
+sc.a3 = connectionPool.admitSession('a3', 'alice');
+sc.anon = connectionPool.admitSession('x1');
+sc.afterRefusals = { pending: pending(), names: names() };
+sc.a1Again = connectionPool.admitSession('a1', 'alice');
+sc.a1Reserve = connectionPool.reserveSession('a1');
+sc.afterAgain = names();
+connectionPool.forgetSession('a1');
+connectionPool.releaseReservation('a1');
+sc.afterForget = names();
+connectionPool.releaseAdmission('b1');
+sc.afterRelease = { pending: pending(), names: names() };
+sc.conn = await settle(connectionPool.getConnection('g1'));
+sc.afterConn = { names: names(), entries: connectionPool.connections.size };
+results.scope = sc;
 ${TAIL}`;
 
 function runChild(script, extraEnv) {
@@ -249,11 +276,42 @@ if (r1) {
   });
 }
 
-const r0 = runChild(NOPOOL, { MAX_CONCURRENT_SESSIONS: '2', USE_CONNECTION_POOL: 'false' });
+const r0 = runChild(NOPOOL, { MAX_CONCURRENT_SESSIONS: '2', USE_CONNECTION_POOL: 'false', MAX_SESSIONS_PER_PRINCIPAL: '1' });
 if (r0) {
-  check('P-pool-off (negative) with pooling off reserveSession always admits and reserves nothing', () => {
+  check('P-pool-off (negative) with pooling off admitSession always admits and records nothing', () => {
     assert.deepStrictEqual(r0.nopool.admitted, [true, true, true, true, true]);
     assert.strictEqual(r0.nopool.pending, 0);
+    assert.strictEqual(r0.nopool.admissions, 0);
+  });
+}
+
+const rs = runChild(SCOPE, { MAX_CONCURRENT_SESSIONS: '2', MAX_SESSIONS_PER_PRINCIPAL: '1' });
+if (rs) {
+  const sc = rs.scope;
+  check('P-scope the principal check refuses alice\'s second session with her own cap and count', () => {
+    assert.deepStrictEqual(sc.a1, { admitted: true });
+    assert.deepStrictEqual(sc.a2, { admitted: false, scope: 'principal', cap: 1, count: 1 });
+    assert.deepStrictEqual(sc.b1, { admitted: true });
+  });
+  check('P-scope at a full pool the global check runs first, for a principal and for none', () => {
+    assert.deepStrictEqual(sc.a3, { admitted: false, scope: 'global' });
+    assert.deepStrictEqual(sc.anon, { admitted: false, scope: 'global' });
+  });
+  check('P-scope (negative) a refusal of either scope records nothing', () => {
+    assert.deepStrictEqual(sc.afterRefusals, { pending: 2, names: ['alice', 'bob'] });
+  });
+  check('P-scope a session already admitted re-admits without counting itself', () => {
+    assert.deepStrictEqual(sc.a1Again, { admitted: true });
+    assert.strictEqual(sc.a1Reserve, true);
+    assert.deepStrictEqual(sc.afterAgain, ['alice', 'bob']);
+  });
+  check('P-scope forgetSession and releaseAdmission drop the admission', () => {
+    assert.deepStrictEqual(sc.afterForget, ['bob']);
+    assert.deepStrictEqual(sc.afterRelease, { pending: 0, names: [] });
+  });
+  check("P-scope getConnection's own reservation records no admission", () => {
+    assert.strictEqual(sc.conn, 'ok');
+    assert.deepStrictEqual(sc.afterConn, { names: [], entries: 1 });
   });
 }
 

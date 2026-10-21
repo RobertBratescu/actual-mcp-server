@@ -138,6 +138,22 @@ export const configSchema = z.object({
       'no spaces around it, no separators; at least 1 byte and at most 9007199254740991 bytes) (#466)',
   ),
   MAX_CONCURRENT_SESSIONS: z.string().default('15').transform(val => parseInt(val, 10)),
+  // #577: optional per-principal session cap under MAX_CONCURRENT_SESSIONS. Unset or empty means
+  // no per-principal cap; an empty value in a compose file must not abort startup, which
+  // z.coerce.number() would do (it turns '' into 0). Anything set must be a positive integer.
+  MAX_SESSIONS_PER_PRINCIPAL: z
+    .string()
+    .optional()
+    .transform((raw, ctx) => {
+      const v = (raw ?? '').trim();
+      if (v === '') return undefined;
+      if (/^[1-9]\d*$/.test(v)) return parseInt(v, 10);
+      ctx.addIssue({
+        code: 'custom',
+        message: `MAX_SESSIONS_PER_PRINCIPAL must be a positive integer (unset or empty means no per-principal cap), got ${JSON.stringify(raw)}.`,
+      });
+      return z.NEVER;
+    }),
 
   // --- Published tool surface (#483) ---
   // Which tools this process publishes AND dispatches. Names are validated, and an unknown
