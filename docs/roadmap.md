@@ -73,6 +73,18 @@ Split from Backlog: PR #569 by @jospaquim (per-principal static tokens so severa
 
 Outcome (2026-10-21): done. All three planned tickets shipped, each released with dual-transport evidence: #570 in v0.22.47 (alone, as planned), #571 in v0.22.49 and #572 in v0.22.50, with @jospaquim as co-author and credited. One ticket appeared that the plan did not expect: #574 (a stalled login on one server failed the next operation of every session), found while building #571 and shipped in v0.23.0. #572 went out as a patch although an opt-in feature is a minor, so v0.23.0 carries the minor bump. Work the phase surfaced but did not take went to Backlog: #575 (two processes on one data dir), #576 (#270 regression residue), #577 (per-principal session cap) and #578 (hono advisory lockfile refresh).
 
+## Phase: Shared data dir and gate hygiene
+state: planned
+plan:
+
+Phase 1 exists because our own release gate is the second writer: the full run's `docker exec ... --stdio` step opens the same data dir as the running server (#575), and the #270 regression step leaves residue behind (#576). Until both are fixed the dual-transport evidence can be red, or green, for reasons unrelated to the change under test. The two direct dependency bumps (#579, #580) ride along because they need the same full run to ship and carry no design risk. It comes first because every later phase releases through this gate.
+
+## Phase: Actual API 26.11 adoption
+state: planned
+plan:
+
+Adopts stable @actual-app/api 26.11.0, which carries the upstream fixes we contributed (actual#9020 for #479, actual#8998 for #548). Nothing here can start before that release is published; the bump ticket is filed when Dependabot opens it. It sits after Phase 1 so the API bump is verified by a gate that no longer writes the data dir twice.
+
 ## Phase: Backlog
 state: backlog
 
