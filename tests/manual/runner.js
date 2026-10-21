@@ -295,7 +295,9 @@ export async function run() {
         console.log("\nDeleting test rule (#342 stage)...");
         try {
           await callTool("actual_rules_delete", { id: context.ruleStage342Id });
-          console.log("✓ Rule (#342 stage) deleted");
+          // Not verified here: a tool error comes back as a reply, not a throw. The post-run
+          // zero-residue assertion reads rules and is the check.
+          console.log("  Rule (#342 stage) delete requested; the zero-residue assertion verifies it");
         } catch (err) {
           fail(`Could not delete the #342 stage rule ${context.ruleStage342Id}: ${err.message}. That is residue.`);
         }
