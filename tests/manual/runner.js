@@ -35,6 +35,7 @@ import { createClient } from './mcp-client.js';
 import { createClient as createStdioClient } from './mcp-client-stdio.js';
 import { sweepResidue, assertNoResidue, ResidueUnreadableError, EXIT_RESIDUE, EXIT_UNSAFE_BUDGET } from './residue.js';
 import { fail, failureCount, failureList } from './assert.js';
+import { shouldDeleteCategory } from './context.js';
 import { sanityTests } from './tests/sanity.js';
 import { smokeTests } from './tests/smoke.js';
 import { accountTests } from './tests/account.js';
@@ -312,10 +313,13 @@ export async function run() {
         await callTool("actual_payees_delete", { id: context.payeeId });
         console.log("✓ Payee deleted");
       }
-      if (context.categoryId) {
+      if (shouldDeleteCategory(context)) {
         console.log("\nDeleting test category...");
         await callTool("actual_categories_delete", { id: context.categoryId });
         console.log("✓ Category deleted");
+      } else if (context.categoryId) {
+        // #590: the modules borrowed a PRE-EXISTING category; it is the budget's, not ours.
+        console.log(`\nLeaving pre-existing category ${context.categoryId} in place (borrowed, not created by the suite)`);
       }
       if (context.categoryGroupId) {
         console.log("\nDeleting test category group...");

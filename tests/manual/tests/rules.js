@@ -1,4 +1,5 @@
 import { fail, skip } from '../assert.js';
+import { borrowCategory } from '../context.js';
 /**
  * tests/rules.js
  *
@@ -40,7 +41,7 @@ export async function rulesTests(client, context) {
       : [];
     const firstCat = flatCats[0];
     if (firstCat) {
-      context.categoryId = firstCat.id;
+      borrowCategory(context, firstCat.id); // #590: borrowed, so the runner's cleanup must not delete it
       console.log(`  ℹ Using existing category for rule actions: "${firstCat.name}" (${firstCat.id})`);
     } else {
       // No category found at all: create a disposable one so the test can run.

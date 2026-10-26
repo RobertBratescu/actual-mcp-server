@@ -1,4 +1,5 @@
 import { fail, skip } from '../assert.js';
+import { borrowCategory } from '../context.js';
 /**
  * tests/budget.js
  *
@@ -42,7 +43,7 @@ export async function budgetTests(client, context) {
     // context.categoryId is absent or stale: resolve from live data
     const firstCat = flatCats[0];
     if (firstCat) {
-      context.categoryId = firstCat.id;
+      borrowCategory(context, firstCat.id); // #590: borrowed, so the runner's cleanup must not delete it
       xferGroupId = firstCat.group_id ?? allGroups.find(g => (g.categories || []).some(c => c.id === firstCat.id))?.id ?? null;
       console.log(`  ℹ Using existing category for budget tests: "${firstCat.name}" (${firstCat.id})`);
     } else {

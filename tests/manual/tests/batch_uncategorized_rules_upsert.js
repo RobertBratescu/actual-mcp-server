@@ -1,4 +1,5 @@
 import { fail, skip } from '../assert.js';
+import { borrowCategory } from '../context.js';
 /**
  * tests/batch_uncategorized_rules_upsert.js
  *
@@ -44,7 +45,7 @@ export async function batchUncategorizedRulesUpsertTests(client, context) {
         : [];
       const firstCat = flatCats[0];
       if (firstCat) {
-        context.categoryId = firstCat.id;
+        borrowCategory(context, firstCat.id); // #590: borrowed, so the runner's cleanup must not delete it
         console.log(`  ℹ Using existing category for batch/upsert tests: "${firstCat.name}" (${firstCat.id})`);
       } else {
         console.log("  ℹ No expense category found: creating disposable category group + category for batch/upsert tests...");
