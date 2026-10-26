@@ -46,7 +46,8 @@ tests/
 │   ├── transactions_create.test.js        # Zod schema validation (transactions_create)
 │   ├── generated_tools.smoke.test.js      # All 84 tools: stub adapter + correctness assertions
 │   ├── schema_validation.test.js          # Negative-path schema tests (11+ tool schemas)
-│   └── schema_json_openai_compat.test.js  # Published schemas OpenAI/ECMA-262 regex-compatible (#293)
+│   ├── schema_json_openai_compat.test.js  # Published schemas OpenAI/ECMA-262 regex-compatible (#293)
+│   └── schema_published_parity.test.js    # Zod and the SDK Ajv validator accept the same inputs; no regex flags (#588)
 ├── e2e/                     # End-to-end tests
 │   ├── mcp-client.playwright.spec.ts      # Protocol tests (fast, no Docker)
 │   ├── docker.e2e.spec.ts                 # Docker smoke integration (full stack)
@@ -282,6 +283,7 @@ This paragraph is load bearing: `tests/unit/dual_transport_gate.test.js` anchors
 | `adapter_transaction_batch_abort.test.js` | `adapter.updateTransactionBatch` infrastructure abort (#521): legacy stdio forced shutdown, pooled keep or drop depending on the trailing sync, per-item rate limit and non-infrastructure rejection, applied/unknown/not-attempted counts, `cause` |
 | `transactions_merge_adapter.test.js` | `adapter.mergeTransactions` (#514): typed pre-flight refusals (not found, split child, different accounts, different amounts) never reach the raw call; the happy path sends the plain string tuple once and derives `deletedId` for either kept order |
 | `schema_json_openai_compat.test.js` | Every published tool schema is OpenAI/ECMA-262 regex-compatible: no `\p{...}` escape, each `pattern` compiles without the `u` flag (#293) |
+| `schema_published_parity.test.js` | The published JSON Schema accepts exactly what the Zod schema accepts: every published UUID pattern takes the uppercase Income group id, no regex check in any tool schema carries a flag (`z.toJSONSchema()` drops them), and Zod and the MCP SDK's own Ajv validator agree on a shared fixture set for every regex leaf (#588) |
 | `contributor_docs.test.js` | `AGENTS.md`, `CONTRIBUTING.md` and the PR template name only real `npm run` scripts and link only TRACKED paths; `AGENTS.md` exists, is not ignored and stays at or under 150 lines; every `.github/instructions/*.instructions.md` defers to `AGENTS.md` and never cites the local-only `CLAUDE.md` (#496) |
 | `toolsets.test.js` | #483: toolset partition, preset, `MCP_TOOLS`, strict `MCP_READ_ONLY`, the hard-coded `WRITE_CAPABLE` set guarded by the adapter call graph, the import-allowlist side-effect scan (#533), the single-dispatch check widened to `.call(`, `.apply(`, `.bind(`, bracket and `Reflect.apply` spellings plus a reviewed `getTool(` reader list (#533), the chat preset reference guard, hide-and-refuse dispatch, fail-closed before `initialize()` |
 | `toolsets_entrypoint.test.js` | #483: the built entrypoint over stdio and the HTTP no-session list path: filtered `tools/list`, a hidden tool refused naming its setting, and exit 1 on a bad toolset, tool, `MCP_READ_ONLY` or a zero-tool configuration |
@@ -959,6 +961,7 @@ This project follows a comprehensive testing strategy with multiple levels, from
 | `schedules_update_amount_guard.test.js` | Adapter read-then-write guard for a one-field `amount` / `amountOp` schedule update (#527) | 38 |
 | `schedules_dead_conditions.test.js` | Adapter strip of dead payee / account schedule rule conditions on create and clear, same drain, bounded poll (#547) | 35 |
 | `schema_json_openai_compat.test.js` | Walks all 71 published `z.toJSONSchema()` outputs; asserts no `\p{...}` escape and every `pattern` compiles without the `u` flag, so no tool schema is rejected by OpenAI's Responses validator (#293) | 71 schemas |
+| `schema_published_parity.test.js` | Walks every tool's Zod schema down to its regex leaves; asserts every published UUID `pattern` accepts `2E1F5BDB-209B-43F9-AF2C-3CE28E380C00`, that no regex check carries a flag, and that the Zod verdict equals the `AjvJsonSchemaValidator` verdict on a shared fixture set, with negative fixtures proving each detector fires (#588) | 84 tools, 51 id sites |
 | `unhandled-rejection.test.js` | Allow-list predicate for `process.on('unhandledRejection')`: production-shape secondary rejection swallowed; unrelated EACCES still exits; existing allow-list entries unchanged (#152) | 12 |
 | `rejection-allowlist-purity.test.js` | Static analysis of `src/lib/rejection-allowlist.ts`: sentinel marker present; no static, dynamic, or CommonJS imports of non-node modules; no top-level side-effecting statements (#159) | 5 categories |
 | `httpServer_bearer_auth.test.js` | Bearer auth path through the shared #572 matcher: SHA-256 digest compare with `timingSafeEqual`, no length short-circuit; forbids token-content log lines and any logger import in the auth modules (#157) | 14 |

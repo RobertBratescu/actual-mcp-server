@@ -115,9 +115,25 @@ export const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 export const MONTH_PATTERN = /^\d{4}-\d{2}$/;
 
 /**
- * UUID pattern for ID validation
+ * UUID pattern for ID validation.
+ *
+ * Case-insensitive by CHARACTER CLASS, never by flag (#588). `z.toJSONSchema()` publishes
+ * `.source` as the JSON Schema `pattern` and silently drops `.flags` (a JSON Schema pattern
+ * cannot carry one), so a `/i` here made the server accept ids that every client validating
+ * `inputSchema` (the MCP SDK's Ajv validator, LibreChat, Claude Desktop) refused before the
+ * call left the client. Not a corner case: Actual's bundled default-db.sqlite gives every
+ * budget an Income category group with the fixed uppercase id
+ * `2E1F5BDB-209B-43F9-AF2C-3CE28E380C00`, and SQLite compares ids byte for byte, so the
+ * server cannot lowercase on its behalf either. The two-case class accepts exactly the same
+ * inputs as the flagged form did and survives serialisation.
+ *
+ * Guarded by tests/unit/schema_published_parity.test.js: no regex check in any tool schema
+ * may carry a flag, and Zod and the SDK's validator must agree on every fixture. Not
+ * `z.guid()`: it also publishes `format: "uuid"`, which a strict validator without format
+ * support rejects, and one rejected schema disables the whole tool surface in some clients
+ * (#293). Any change to the published contract belongs in its own ticket.
  */
-export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 /**
  * #276: the Actual Budget SERVER version range this build's `@actual-app/api` is known

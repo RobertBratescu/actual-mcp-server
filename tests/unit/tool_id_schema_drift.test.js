@@ -201,7 +201,7 @@ check('every exported tool is actually walked (a silent skip is the failure mode
 });
 
 check('the UUID pattern was resolved (without it, nothing enforces anything)', () => {
-  assert.ok(UUID_PATTERN && UUID_PATTERN.source.includes('[0-9a-f]{8}'), 'UUID_PATTERN did not load');
+  assert.ok(UUID_PATTERN && UUID_PATTERN.source.includes('[0-9a-fA-F]{8}'), 'UUID_PATTERN did not load');
 });
 
 // IMPORTANT-3 (round 2): the rewrite to a published-schema walk silently RETIRED this
