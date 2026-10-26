@@ -1,6 +1,6 @@
 ─────────────────────────────────────────────────────────────────────────────────
 PROMPT 1 OF 3: SMOKE (Read-Only)
-  Tests 9 read-only tools to confirm the MCP server is connected and healthy.
+  Tests 9 read-only tools, then 2 saved-report tools, to confirm the MCP server is connected and healthy.
 
 HOW TO USE
   1. Make sure the MCP server is running and connected to the chat platform.
@@ -21,6 +21,10 @@ WHAT IT TESTS (Phase 1: 9 tools)
   actual_get_context (positive + negative sub-calls, counts as 1 tool)
   actual_get_id_by_name (4 sub-calls, counts as 1 tool)
   actual_entities_search (positive + negative sub-calls, counts as 1 tool)
+
+WHAT IT TESTS (Phase 1b: 2 tools)
+  actual_reports_list
+  actual_reports_get (positive when a report exists, plus a missing-id call)
 ─────────────────────────────────────────────────────────────────────────────────
 ─── PROMPT START ────────────────────────────────────────────────────────────────
 
@@ -109,6 +113,25 @@ Abort immediately if a destructive operation would affect non-test data.
     Input: { type: 'payees', query: 'zzz-nonexistent-xqz-9999', matchType: 'contains', limit: 10 }
     Expect: { matches: [], count: 0 } with no error field and no exception thrown.
     Verify: count === 0, matches is an empty array.
+
+---
+
+**Phase 1b: Saved custom reports (2 tools):**
+
+- actual_reports_list, test positive:
+  Call with {}.
+  Expect: an array (possibly empty). Each item has id, name, graph_type, mode, group_by,
+  balance_type, interval, date_range, start_date, end_date. tombstone is absent.
+  If the array is non-empty, save the first id as `{report1_id}`.
+
+- actual_reports_get, test positive + negative:
+  * Positive: if `{report1_id}` was saved, call with that id.
+    Expect: { found: true, id, name, conditions, metadata, color_scheme, tombstone }.
+    conditions, metadata, and color_scheme are objects or null (✓ pass).
+    If the list was empty, report ✓ informational and skip this sub-call.
+  * Negative: call with id '00000000-0000-4000-8000-00000000abcd'.
+    Expect: { found: false, id, report: null, message } and no exception (✓ pass).
+    If the call throws, or found is not false, that is ✗ fail.
 
 ---
 

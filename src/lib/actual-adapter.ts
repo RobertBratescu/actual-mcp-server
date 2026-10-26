@@ -1,5 +1,6 @@
 import type { components } from '../../generated/actual-client/types.js';
 import { subtransactionsSum } from './schemas/common.js';
+import { CUSTOM_REPORT_COLUMNS, CUSTOM_REPORT_LIST_COLUMNS, type ReportRow } from './custom-reports.js';
 
 import { AsyncLocalStorage } from 'async_hooks';
 import api from '@actual-app/api';
@@ -5269,6 +5270,42 @@ export async function getPreferences(): Promise<Record<string, unknown>> {
   });
 }
 
+/**
+ * Read custom_reports through ActualQL q(). The table is in the upstream schema;
+ * this does not open the sqlite file and does not go through actual_query_run.
+ */
+async function queryCustomReports(
+  metric: string,
+  select: readonly string[],
+  filter: Record<string, unknown>,
+): Promise<ReportRow[]> {
+  return withActualApi(async () => {
+    observability.incrementToolCall(metric).catch(() => {});
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { q } = (await import('@actual-app/api')) as any;
+    const response = await withConcurrency(() =>
+      retry(
+        () =>
+          rawRunQuery(
+            q('custom_reports').filter(filter).select([...select]),
+          ) as Promise<{ data?: ReportRow[] } | ReportRow[]>,
+        { retries: 2, backoffMs: 200, isRetryable: isRetryableError },
+      ),
+    );
+    if (Array.isArray(response)) return response;
+    return Array.isArray(response?.data) ? response.data : [];
+  });
+}
+
+export async function listCustomReports(): Promise<ReportRow[]> {
+  return queryCustomReports('actual.reports.list', CUSTOM_REPORT_LIST_COLUMNS, { tombstone: false });
+}
+
+export async function getCustomReport(id: string): Promise<ReportRow | null> {
+  const rows = await queryCustomReports('actual.reports.get', CUSTOM_REPORT_COLUMNS, { id });
+  return rows[0] ?? null;
+}
+
 export default {
   getAccounts,
   resolveFilterId,
@@ -5342,6 +5379,8 @@ export default {
   exportBudget,
   importBudget,
   getPreferences,
+  listCustomReports,
+  getCustomReport,
   getContext,
   notifications,
 };

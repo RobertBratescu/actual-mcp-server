@@ -493,7 +493,7 @@ name; the refusal names the setting responsible. When both settings hide a tool,
 
 - `MCP_READ_ONLY=true` hides and refuses the 47 write-capable tools: every tool that
   reaches the adapter write queue, plus `actual_bank_sync`, `actual_budgets_export`,
-  `actual_budgets_switch` and `actual_session_close`. 36 tools remain.
+  `actual_budgets_switch` and `actual_session_close`. 39 tools remain.
   `actual_query_run` (SELECT only) and `actual_session_list` stay available.
 - The setting is per process, not per principal. Every caller of the process sees the
   same surface.

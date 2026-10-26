@@ -48,6 +48,7 @@ Because all three prompts run in the **same chat session**, the AI retains:
 | Phase | Prompt | Tools | Domain |
 |-------|--------|-------|--------|
 | 1 | Prompt 1 | 9 | Server info, read-only lists, `actual_get_context`, `actual_get_id_by_name`, `actual_entities_search` |
+| 1b | Prompt 1 | 2 | Saved custom reports (`actual_reports_list`, `actual_reports_get`) |
 | 2 | Prompt 2 | 6 | Account CRUD |
 | 2b | Prompt 2 | 4 | Account group CRUD (#429) |
 | 3 | Prompt 2 | 6 | Category Group & Category CRUD |
@@ -67,7 +68,7 @@ Because all three prompts run in the **same chat session**, the AI retains:
 | 11 | Prompt 3 |  | Concurrency (optional, skipped by default) |
 | 12 | Prompt 3 |  | Full cleanup |
 
-**Total: 84 tools across 3 prompts**
+**Total: 86 tools across 3 prompts**
 
 ---
 

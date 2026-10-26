@@ -124,6 +124,10 @@ export const TOOLSETS = {
     'actual_payees_merge',
   ],
   query: ['actual_query_run'],
+  reports: [
+    'actual_reports_list',
+    'actual_reports_get',
+  ],
   admin: [
     'actual_budgets_switch',
     'actual_budgets_import',
@@ -143,7 +147,7 @@ export const TOOLSET_NAMES = Object.keys(TOOLSETS) as ToolsetName[];
  *
  * `chat` is seeded from a real day-to-day chat-assistant flow (#477): bootstrap, one read
  * path, the batch writes, and the few single writes a chat assistant needs. It is 12 tools
- * where the full surface is 83, roughly a 76% cut in tools/list bytes.
+ * where the full surface is 86, roughly a 76% cut in tools/list bytes.
  *
  * actual_budgets_getMonth is in it on purpose (decision recorded on #483): budget_updates_batch
  * and budgets_setAmount tell the model to read a month back with it, and query_run has no

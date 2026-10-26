@@ -139,7 +139,7 @@
 
 ### Tool Definitions
 
-84 tools organized by category:
+86 tools organized by category:
 
 ```
 src/tools/
@@ -219,6 +219,8 @@ src/tools/
 ├── tags_delete.ts
 ├── notes_get.ts                        # Notes (2 tools)
 ├── notes_update.ts
+├── reports_list.ts                     # Custom reports (2 tools)
+├── reports_get.ts
 ├── query_run.ts                        # Advanced ActualQL queries
 ├── bank_sync.ts                        # Bank synchronization
 └── index.ts                            # Tool exports
@@ -349,7 +351,7 @@ actual-mcp-server/
 │   │   ├── setup.ts              # OIDC/JWKS factory (AUTH_PROVIDER=oidc)
 │   │   └── budget-acl.ts         # Per-user budget ACL (email/sub/group)
 │   │
-│   ├── tools/                    # MCP tool definitions (84 tools + index.ts)
+│   ├── tools/                    # MCP tool definitions (86 tools + index.ts)
 │   │   ├── server_info.ts        # Server info (1 tool)
 │   │   ├── session_*.ts          # Session management (2 tools)
 │   │   ├── accounts_*.ts         # Accounts (7 tools)
@@ -380,7 +382,7 @@ actual-mcp-server/
 │   ├── e2e/                      # End-to-end tests (Playwright)
 │   │   ├── mcp-client.playwright.spec.ts  # Protocol compliance tests
 │   │   ├── docker.e2e.spec.ts             # Docker smoke tests
-│   │   ├── docker-all-tools.e2e.spec.ts   # All-tools Docker E2E (~80 named tests, all 84 tools)
+│   │   ├── docker-all-tools.e2e.spec.ts   # All-tools Docker E2E (~80 named tests, all 86 tools)
 │   │   ├── run-docker-e2e.sh              # Docker test orchestrator
 │   │   └── (#366: the suites/ tree was removed. It never executed, and every doc that
 │   │        named it now points at docker-all-tools.e2e.spec.ts instead)
@@ -442,7 +444,7 @@ actual-mcp-server/
 5. Tool Registry Initialization
    └─> src/actualToolsManager.ts loads all tools
    └─> Validates tool schemas
-   └─> Registers 84 tools with MCP capabilities
+   └─> Registers 86 tools with MCP capabilities
 
 6. MCP Connection Setup
    └─> Create ActualMCPConnection instance

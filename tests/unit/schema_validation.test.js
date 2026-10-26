@@ -740,6 +740,57 @@ async function expectCallError(tool, input, label) {
   if (!expectParseOk(entities_search_tool, { type: 'categories', query: ['gro', 'rent'], matchType: 'fuzzy', limit: 5 },
     'valid: multi-pattern fuzzy with limit')) fail();
 
+  // ── actual_reports_get / actual_reports_list ────────────────────────────
+  console.log('\n[actual_reports_get -- schema validation]');
+  const reports_get_tool = await import('../../dist/src/tools/reports_get.js').then(m => m.default);
+  const reports_list_tool = await import('../../dist/src/tools/reports_list.js').then(m => m.default);
+  const { formatZodError } = await import('../../dist/src/lib/zod-error-format.js');
+  const reportSchemaMessage = (tool, input) => {
+    try {
+      tool.inputSchema.parse(input);
+      return '';
+    } catch (err) {
+      return formatZodError(err, tool.inputSchema);
+    }
+  };
+
+  if (!expectParseError(reports_get_tool, {}, 'empty input -- missing id')) fail();
+  if (!expectParseError(reports_get_tool, { id: 'not-a-uuid' }, 'non-UUID id rejected')) fail();
+  if (!expectParseError(reports_get_tool, { id: 12 }, 'non-string id rejected')) fail();
+  if (!expectParseError(reports_get_tool, { id: '00000000-0000-4000-8000-0000000000c1', extra: true }, 'unknown field rejected')) fail();
+  if (!expectParseOk(reports_get_tool, { id: '00000000-0000-4000-8000-0000000000c1' }, 'UUID id accepted')) fail();
+  if (!expectParseError(reports_list_tool, { id: '00000000-0000-4000-8000-0000000000c1' }, 'list rejects unexpected fields')) fail();
+  if (!expectParseOk(reports_list_tool, {}, 'list accepts an empty object')) fail();
+
+  const missingId = reportSchemaMessage(reports_get_tool, {});
+  if (!missingId.includes('id is required')) {
+    console.error(`  FAIL missing id message: ${missingId}`);
+    failures++;
+  } else {
+    console.log('  ✓ missing id message names the field');
+  }
+  const badId = reportSchemaMessage(reports_get_tool, { id: 'not-a-uuid' });
+  if (!badId.includes('Invalid report ID format') || !badId.includes('UUID')) {
+    console.error(`  FAIL bad id message: ${badId}`);
+    failures++;
+  } else {
+    console.log('  ✓ non-UUID id message names the format and the value');
+  }
+  const badType = reportSchemaMessage(reports_get_tool, { id: 12 });
+  if (!badType.includes('string') || !badType.includes('number')) {
+    console.error(`  FAIL wrong type message: ${badType}`);
+    failures++;
+  } else {
+    console.log('  ✓ wrong type message names string and number');
+  }
+  const unknown = reportSchemaMessage(reports_get_tool, { id: '00000000-0000-4000-8000-0000000000c1', extra: true });
+  if (!unknown.includes('extra')) {
+    console.error(`  FAIL unknown field message: ${unknown}`);
+    failures++;
+  } else {
+    console.log('  ✓ unknown field message names the field');
+  }
+
   // ─── summary ─────────────────────────────────────────────────────────────
   console.log('');
   if (failures > 0) {

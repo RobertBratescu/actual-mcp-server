@@ -80,6 +80,8 @@ const READ_ONLY = new Set<string>([
   'actual_payees_get',
   'actual_preferences_get',
   'actual_query_run',
+  'actual_reports_get',
+  'actual_reports_list',
   'actual_rules_get',
   'actual_schedules_get',
   'actual_server_get_version',

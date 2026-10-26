@@ -9,6 +9,7 @@
  */
 
 import { sanityTests } from './sanity.js';
+import { reportsTests } from './reports.js';
 
 /**
  * @param {{ callTool: Function, listTools: Function }} client
@@ -18,6 +19,7 @@ export async function smokeTests(client) {
   console.log("\n-- Running SMOKE TESTS --");
 
   await sanityTests(client);
+  await reportsTests(client, {});
 
   // Categories
   console.log("\nTesting category list...");

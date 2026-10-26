@@ -285,6 +285,7 @@ Cleanup order (dependencies first):
 
 PROMPT 1 (Smoke):
   Phase 1  Server & Read-Only:        X / 9
+  Phase 1b Saved custom reports:      X / 2
 
 PROMPT 2 (Core CRUD):
   Phase 2  Accounts:                  X / 6
@@ -308,7 +309,7 @@ PROMPT 3 (Advanced):
   Phase 11 Concurrency:               Skipped / Ran (X/10)
 
 ─────────────────────────────────────────────
-  Total Tools Tested:   X / 84
+  Total Tools Tested:   X / 86
   Passed (✓):           X
   Failed (✗):           X
   Informational (ℹ):    X

@@ -169,6 +169,44 @@ console.log('Running generated tools smoke tests');
     exportBudget: new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00]),
     importBudget: { id: '00000000-0000-0000-0000-0000000000ee' },
     getPreferences: { dateFormat: 'yyyy-MM-dd', numberFormat: 'dot-comma', firstDayOfWeekIdx: '1' },
+    listCustomReports: [{
+      id: '00000000-0000-4000-8000-0000000000c1',
+      name: 'Monthly spending',
+      graph_type: 'BarGraph',
+      mode: 'total',
+      group_by: 'Category',
+      balance_type: 'Expense',
+      interval: 'Monthly',
+      date_range: 'Last 3 months',
+      start_date: '2023-06',
+      end_date: '2023-09',
+      tombstone: true,
+    }],
+    getCustomReport: {
+      id: '00000000-0000-4000-8000-0000000000c1',
+      name: 'Monthly spending',
+      start_date: '2023-06',
+      end_date: '2023-09',
+      date_static: 0,
+      date_range: 'Last 3 months',
+      mode: 'total',
+      group_by: 'Category',
+      sort_by: 'desc',
+      balance_type: 'Expense',
+      show_empty: 0,
+      show_offbudget: 0,
+      show_hidden: 0,
+      show_uncategorized: 0,
+      trim_intervals: 0,
+      include_current: 0,
+      graph_type: 'BarGraph',
+      conditions: '{"op":"is","field":"category"}',
+      conditions_op: 'and',
+      metadata: '{"hidden":[]}',
+      interval: 'Monthly',
+      color_scheme: '{"series":"default"}',
+      tombstone: false,
+    },
     getContext: {
       accounts: [{ id: 'a1', name: 'Cash', offbudget: false, closed: false }],
       categoryGroups: [{ id: 'g1', name: 'Expenses', is_income: false, categories: [{ id: 'c1', name: 'Food', hidden: false }] }],
@@ -278,6 +316,7 @@ console.log('Running generated tools smoke tests');
   if (name.includes('tags_update')) inputExample.id = '00000000-0000-0000-0000-0000000000aa', inputExample.tag = 'food';
   if (name.includes('tags_delete')) inputExample.id = '00000000-0000-0000-0000-0000000000aa';
   if (name.includes('notes_get')) inputExample.id = '00000000-0000-0000-0000-0000000000ab';
+  if (name.includes('reports_get')) inputExample.id = '00000000-0000-4000-8000-0000000000c1';
   // notes_update: use a budget-YYYY-MM id to bypass the entity-lookup guard
   // (the smoke test stubs return empty entity lists, so a UUID would fail the guard)
   if (name.includes('notes_update')) inputExample.id = 'budget-2026-01', inputExample.note = '#template 250';
@@ -476,6 +515,18 @@ console.log('Running generated tools smoke tests');
       // tags_update / tags_delete: createTool wraps { success: true } in { result }
       if (n === 'tags_update' || n === 'tags_delete') {
         if (res?.result?.success !== true) shapeErr(`expected { result: { success: true } }`);
+      }
+      if (n === 'reports_list') {
+        if (!Array.isArray(res?.result)) shapeErr('expected { result: array }');
+        if (res.result[0]?.name !== 'Monthly spending') shapeErr('expected stub report name');
+        if (res.result[0]?.tombstone !== undefined) shapeErr('list must not return tombstone');
+      }
+      if (n === 'reports_get') {
+        const r = res?.result;
+        if (r?.found !== true) shapeErr('expected result.found true');
+        if (r?.conditions?.op !== 'is') shapeErr('expected conditions parsed to an object');
+        if (!Array.isArray(r?.metadata?.hidden)) shapeErr('expected metadata parsed to an object');
+        if (r?.color_scheme?.series !== 'default') shapeErr('expected color_scheme parsed to an object');
       }
       // notes_get: createTool wraps the note result in { result }
       if (n === 'notes_get') {

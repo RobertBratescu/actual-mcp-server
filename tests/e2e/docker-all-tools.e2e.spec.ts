@@ -1,5 +1,5 @@
 /**
- * Comprehensive Docker E2E Tests - ALL 84 TOOLS
+ * Comprehensive Docker E2E Tests - ALL 86 TOOLS
  *
  * Tests every tool with success and error scenarios.
  *
@@ -15,7 +15,7 @@
 import { test, expect, today, currentMonth, uniqueSuffix, CLEANUP_ORDER, isStdio } from './fixtures.js';
 import { DEFAULT_MCP_SERVER_URL, HTTP_PATH } from '../shared/e2e-helpers.js';
 
-test.describe('Docker E2E - ALL 84 TOOLS', () => {
+test.describe('Docker E2E - ALL 86 TOOLS', () => {
   // ==================== SERVER INFO ====================
   test('actual_server_info - should return server info', async ({ mcp }) => {
     const data = await mcp.call('actual_server_info');
@@ -2473,6 +2473,26 @@ test.describe('Docker E2E - ALL 84 TOOLS', () => {
 
     const tags = ((await mcp.call('actual_tags_list')) ?? []) as any[];
     expect(tags.find((t: any) => t?.id === tagId)).toBeFalsy();
+  });
+
+  // ==================== CUSTOM REPORTS (2 tools) ====================
+  test('actual_reports_list - should list saved custom reports', async ({ mcp }) => {
+    const data = await mcp.call('actual_reports_list');
+    expect(Array.isArray(data)).toBe(true);
+    for (const row of data as Array<Record<string, unknown>>) {
+      expect(typeof row.id).toBe('string');
+      expect(typeof row.name).toBe('string');
+      expect(row.tombstone).toBeUndefined();
+    }
+  });
+
+  test('actual_reports_get - missing id returns found false', async ({ mcp }) => {
+    const id = '00000000-0000-4000-8000-00000000abcd';
+    const data = await mcp.call('actual_reports_get', { id });
+    expect(data?.found).toBe(false);
+    expect(data?.id).toBe(id);
+    expect(data?.report).toBeNull();
+    expect(String(data?.message ?? '')).toContain(id);
   });
 
   // ==================== PREFERENCES (1 tool) ====================

@@ -16,7 +16,7 @@ This guide covers connecting AI clients (LibreChat, LobeChat, or any MCP-compati
 ┌─────────────┐   MCP/HTTP   ┌──────────────────┐   Actual API   ┌──────────────┐
 │  AI Client  │ ◄──────────► │  Actual MCP      │ ◄───────────► │   Actual     │
 │ (LibreChat  │              │  Server          │               │   Budget     │
-│  LobeChat)  │              │  (84 tools)      │               │   Server     │
+│  LobeChat)  │              │  (86 tools)      │               │   Server     │
 └─────────────┘              └──────────────────┘               └──────────────┘
 ```
 
@@ -67,7 +67,7 @@ Then restart LibreChat:
 docker restart ai-librechat
 ```
 
-Verify tools loaded. In the LibreChat UI you should see **84 tools** listed under the MCP server entry.
+Verify tools loaded. In the LibreChat UI you should see **86 tools** listed under the MCP server entry.
 
 **Recommended for LibreChat and Gemini:** set `MCP_TOOLSETS=chat` on the MCP server. Both clients work better with a small tool list; the `chat` preset publishes 12 tools (about a quarter of the `tools/list` payload) and covers everyday transaction, rule and budget work. Add specific tools with `MCP_TOOLS` if you need them. See [Reducing the tool surface](../../README.md#reducing-the-tool-surface).
 
@@ -102,7 +102,7 @@ In the LobeChat UI:
    - **Authorization**: `Bearer YOUR_TOKEN_HERE`
 4. Click **Save**
 
-LobeChat will automatically discover all 84 tools.
+LobeChat will automatically discover all 86 tools.
 
 ---
 
@@ -361,7 +361,7 @@ After connecting an AI client, verify:
 curl http://localhost:3600/health
 # Expected: {"status":"ok","initialized":true,...}
 
-# 2. Tools loaded (should list 84 tools)
+# 2. Tools loaded (should list 86 tools)
 curl -s -X POST http://localhost:3600/http \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_TOKEN" \
@@ -370,7 +370,7 @@ curl -s -X POST http://localhost:3600/http \
 ```
 
 In your AI client you should see:
-- ✅ 84 tools loaded with `actual_` prefix
+- ✅ 86 tools loaded with `actual_` prefix
 - ✅ `actual_server_info` tool available
 - ✅ Natural language queries returning results
 
